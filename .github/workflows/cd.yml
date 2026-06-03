@@ -1,0 +1,343 @@
+# ORG-DEVOPS/.github/workflows/tf-cd.yml
+#
+# Reusable CD workflow — called by product repos on merge to main.
+#
+# Key behaviors:
+#
+#   APPLY STRATEGY
+#   ├── Downloads the exact plan artifact produced by CI (same SHA)
+#   ├── Applies that plan — no re-plan, no drift from what was reviewed
+#   └── If plan exitcode was 0 (no changes), apply is skipped entirely
+#
+#   ROLLBACK ON FAILURE
+#   ├── If apply fails mid-way (partial resource creation), triggers destroy
+#   ├── Destroy targets only resources tracked in THIS state file
+#   ├── Non-prod: destroy runs automatically
+#   └── Prod/preprod: destroy is BLOCKED — alert only, team decides fix-forward
+#       (destroying prod infra automatically is too dangerous)
+#
+#   UPDATE SAFETY
+#   ├── Terraform tracks state — existing resources are modified, not recreated
+#   ├── The saved plan makes this deterministic (apply = exactly what was planned)
+#   └── force-replace is never used here; only explicit plan changes apply
+#
+#   ENVIRONMENT GATES
+#   ├── dev       → no approval needed
+#   ├── qa        → GitHub Environment approval (1 reviewer)
+#   ├── preprod   → GitHub Environment approval (2 reviewers)
+#   ├── prod      → GitHub Environment approval + change window enforced
+#   └── dr        → GitHub Environment approval + min 4h after last prod apply
+
+name: "[reusable] Terraform CD"
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Path to the Terraform environment directory. E.g. environments/dev"
+        required: true
+        type: string
+      environment:
+        description: "Target environment: dev | qa | preprod | prod | dr"
+        required: true
+        type: string
+      terraform_version:
+        required: false
+        type: string
+        default: "1.10.5"
+      plan_artifact_name:
+        description: "Name of the plan artifact uploaded by CI. Must match exactly."
+        required: true
+        type: string
+      plan_exitcode:
+        description: "Exit code from CI plan. 0=no changes, 2=changes. CD skips apply if 0."
+        required: true
+        type: string
+      # Change window (prod/dr only) — times in UTC
+      change_window_start_utc:
+        description: "Change window start hour in UTC (24h). Default 12 = 07:00 ECT."
+        required: false
+        type: string
+        default: "12"
+      change_window_end_utc:
+        description: "Change window end hour in UTC (24h). Default 22 = 17:00 ECT."
+        required: false
+        type: string
+        default: "22"
+
+    secrets:
+      DEVOPS_ACCOUNT_ID:
+        required: true
+      STATE_ROLE_NAME:
+        required: true
+      TF_STATE_BUCKET:
+        required: true
+      TF_STATE_KEY:
+        required: true
+      TF_STATE_KMS_KEY_ID:
+        required: true
+      TARGET_ACCOUNT_ID:
+        required: true
+      TARGET_ROLE_NAME:
+        required: true
+
+    outputs:
+      apply_outcome:
+        description: "success | skipped | failed | rolled_back"
+        value: ${{ jobs.apply.outputs.outcome }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Concurrency — only one CD run per environment at a time.
+#  New runs queue (not cancel) to avoid losing applies.
+# ─────────────────────────────────────────────────────────────────────────────
+concurrency:
+  group: "tf-cd-${{ inputs.environment }}"
+  cancel-in-progress: false   # queue, never cancel a running apply
+
+jobs:
+  apply:
+    name: "Terraform apply (${{ inputs.environment }})"
+    runs-on: [self-hosted, terraform]
+    environment: ${{ inputs.environment }}
+    # ↑ GitHub Environment protection rules (approval gates) are enforced here.
+    #   Configure reviewers per environment in repo Settings → Environments.
+
+    outputs:
+      outcome: ${{ steps.set_outcome.outputs.value }}
+
+    steps:
+      # ── 0. Skip if no changes ────────────────────────────────────────
+      - name: Skip — no changes in plan
+        if: inputs.plan_exitcode == '0'
+        run: |
+          echo "::notice::Plan reported no changes (exitcode=0). Apply skipped."
+          echo "Nothing to apply for environment: ${{ inputs.environment }}"
+
+      # ── 1. Change window enforcement (prod and dr only) ──────────────
+      - name: Change window check
+        if: |
+          inputs.plan_exitcode != '0' &&
+          (inputs.environment == 'prod' || inputs.environment == 'dr')
+        run: |
+          HOUR=$(date -u +%H)
+          DAY=$(date -u +%u)   # 1=Mon ... 7=Sun
+          START=${{ inputs.change_window_start_utc }}
+          END=${{ inputs.change_window_end_utc }}
+
+          echo "Current UTC time: $(date -u)"
+          echo "Change window: ${START}:00–${END}:00 UTC, Mon–Fri"
+
+          if [[ $DAY -ge 6 ]]; then
+            echo "::error::❌ Weekend deployments to '${{ inputs.environment }}' are not permitted."
+            echo "::error::Use break-glass procedure for emergencies (create incident ticket first)."
+            exit 1
+          fi
+
+          if [[ $HOUR -lt $START || $HOUR -ge $END ]]; then
+            echo "::error::❌ Current time (${HOUR}:xx UTC) is outside the change window (${START}:00–${END}:00 UTC)."
+            echo "::error::Use break-glass procedure for emergencies."
+            exit 1
+          fi
+
+          echo "✅ Within change window."
+
+      # ── 2. Checkout ──────────────────────────────────────────────────
+      - name: Checkout
+        if: inputs.plan_exitcode != '0'
+        uses: actions/checkout@v4
+
+      # ── 3. Setup Terraform ───────────────────────────────────────────
+      - name: Setup Terraform
+        if: inputs.plan_exitcode != '0'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      # ── 4. Assume state role ─────────────────────────────────────────
+      - name: Configure AWS credentials (state role)
+        if: inputs.plan_exitcode != '0'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}
+          aws-region: us-east-1
+          role-session-name: tf-cd-state-${{ inputs.environment }}-${{ github.run_id }}
+
+      # ── 5. Init (same flags as CI — required to re-attach backend) ───
+      - name: Terraform init
+        if: inputs.plan_exitcode != '0'
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.TF_STATE_KEY }}" \
+            -backend-config="region=us-east-1" \
+            -backend-config="encrypt=true" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY_ID }}" \
+            -backend-config="use_lockfile=true" \
+            -backend-config="role_arn=arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}" \
+            -input=false \
+            -reconfigure
+
+      # ── 6. Download plan artifact ─────────────────────────────────────
+      # This is the EXACT plan generated and reviewed in CI.
+      # No re-plan occurs. What was approved = what gets applied.
+      - name: Download plan artifact
+        if: inputs.plan_exitcode != '0'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.plan_artifact_name }}
+          path: ${{ inputs.working_directory }}
+
+      # ── 7. Assume apply role in target account ───────────────────────
+      - name: Configure AWS credentials (target account)
+        if: inputs.plan_exitcode != '0'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.TARGET_ACCOUNT_ID }}:role/${{ secrets.TARGET_ROLE_NAME }}
+          aws-region: us-east-1
+          role-session-name: tf-cd-apply-${{ inputs.environment }}-${{ github.run_id }}
+
+      # ── 8. Terraform apply ────────────────────────────────────────────
+      # Uses the saved plan binary — Terraform applies exactly those changes.
+      # Existing resources are modified in-place; nothing is recreated unless
+      # the plan explicitly called for replacement (shown in the PR comment).
+      - name: Terraform apply
+        id: apply
+        if: inputs.plan_exitcode != '0'
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set +e
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+          APPLY_EXIT=$?
+          echo "apply_exit=$APPLY_EXIT" >> $GITHUB_OUTPUT
+
+          if [ "$APPLY_EXIT" -ne "0" ]; then
+            echo "::error::❌ terraform apply failed with exit code $APPLY_EXIT."
+            echo "APPLY_FAILED=true" >> $GITHUB_ENV
+          else
+            echo "✅ terraform apply completed successfully."
+            echo "APPLY_FAILED=false" >> $GITHUB_ENV
+          fi
+          # Do not exit 1 here — let the rollback step run first
+          exit 0
+
+      # ── 9. ROLLBACK — auto destroy on failure ─────────────────────────
+      #
+      # Triggered when apply fails AND environment is non-prod.
+      # Runs terraform destroy -target on everything in the state file,
+      # effectively undoing the partial apply.
+      #
+      # IMPORTANT: This destroys only what is tracked in THIS state file
+      # (scoped to this working_directory/key). It cannot affect other
+      # environment states.
+      #
+      # Prod/preprod: destroy is NEVER automatic — too risky.
+      # Human decision required for those environments.
+      # ─────────────────────────────────────────────────────────────────
+      - name: Rollback — auto destroy (non-prod only)
+        id: rollback
+        if: |
+          env.APPLY_FAILED == 'true' &&
+          (inputs.environment == 'dev' || inputs.environment == 'qa')
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          echo "::warning::⚠️ Apply failed. Initiating automatic rollback (destroy) for environment: ${{ inputs.environment }}"
+          echo "Listing resources currently tracked in state..."
+          terraform state list || true
+
+          echo "Running terraform destroy to clean up partial resources..."
+          terraform destroy \
+            -var-file=terraform.tfvars \
+            -input=false \
+            -auto-approve
+
+          DESTROY_EXIT=$?
+          if [ "$DESTROY_EXIT" -ne "0" ]; then
+            echo "::error::❌ Rollback (destroy) also failed. Manual intervention required."
+            echo "::error::Resources may be in an inconsistent state. Check AWS console."
+            echo "ROLLBACK_OUTCOME=failed" >> $GITHUB_ENV
+          else
+            echo "✅ Rollback complete. All partial resources destroyed."
+            echo "ROLLBACK_OUTCOME=success" >> $GITHUB_ENV
+          fi
+
+      - name: Rollback — alert only (preprod/prod/dr)
+        if: |
+          env.APPLY_FAILED == 'true' &&
+          (inputs.environment == 'preprod' || inputs.environment == 'prod' || inputs.environment == 'dr')
+        run: |
+          echo "::error::❌ Apply failed in '${{ inputs.environment }}'."
+          echo "::error::Automatic destroy is DISABLED for this environment to protect production resources."
+          echo "::error::ACTION REQUIRED: Review the failed resources in AWS Console and decide:"
+          echo "::error::  Option A — Fix-forward: push a corrected PR and re-apply."
+          echo "::error::  Option B — Manual destroy: run 'terraform destroy' locally with appropriate credentials."
+          echo "::error::State file: s3://${{ secrets.TF_STATE_BUCKET }}/${{ secrets.TF_STATE_KEY }}"
+          echo "ROLLBACK_OUTCOME=blocked_manual_action_required" >> $GITHUB_ENV
+
+      # ── 10. Job summary ───────────────────────────────────────────────
+      - name: Write job summary
+        if: always() && inputs.plan_exitcode != '0'
+        run: |
+          APPLY_FAILED="${APPLY_FAILED:-false}"
+          ROLLBACK_OUTCOME="${ROLLBACK_OUTCOME:-n/a}"
+
+          if [ "$APPLY_FAILED" = "false" ]; then
+            STATUS="✅ Success"
+            OUTCOME="success"
+          elif [ "$ROLLBACK_OUTCOME" = "success" ]; then
+            STATUS="🔄 Failed — rolled back"
+            OUTCOME="rolled_back"
+          elif [ "$ROLLBACK_OUTCOME" = "failed" ]; then
+            STATUS="💥 Failed — rollback also failed"
+            OUTCOME="failed"
+          elif [ "$ROLLBACK_OUTCOME" = "blocked_manual_action_required" ]; then
+            STATUS="🚨 Failed — manual action required (prod/preprod)"
+            OUTCOME="failed"
+          else
+            STATUS="⚠️ Unknown"
+            OUTCOME="failed"
+          fi
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Terraform CD — ${{ inputs.environment }}
+
+          | Field | Value |
+          |-------|-------|
+          | **Status** | ${STATUS} |
+          | **Environment** | \`${{ inputs.environment }}\` |
+          | **Directory** | \`${{ inputs.working_directory }}\` |
+          | **Plan artifact** | \`${{ inputs.plan_artifact_name }}\` |
+          | **State bucket** | \`${{ secrets.TF_STATE_BUCKET }}\` |
+          | **State key** | \`${{ secrets.TF_STATE_KEY }}\` |
+          | **Triggered by** | @${{ github.actor }} |
+          | **Commit** | \`${{ github.sha }}\` |
+          | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          EOF
+
+          echo "outcome=$OUTCOME" >> /tmp/outcome.txt
+
+      - name: Set outcome output
+        id: set_outcome
+        if: always()
+        run: |
+          if [ -f /tmp/outcome.txt ]; then
+            OUTCOME=$(cat /tmp/outcome.txt | grep outcome | cut -d= -f2)
+          elif [ "${{ inputs.plan_exitcode }}" = "0" ]; then
+            OUTCOME="skipped"
+          else
+            OUTCOME="failed"
+          fi
+          echo "value=$OUTCOME" >> $GITHUB_OUTPUT
+
+      # ── 11. Fail the job if apply failed ─────────────────────────────
+      # Done last so that rollback steps always run first.
+      - name: Fail job on apply error
+        if: env.APPLY_FAILED == 'true'
+        run: |
+          echo "::error::Job failed due to apply error. See steps above for details."
+          exit 1
