@@ -1,16 +1,34 @@
 # ORG-DEVOPS/.github/workflows/tf-ci.yml
 #
-# Reusable CI workflow — called by every product repo on Pull Request.
+# Reusable CI workflow — triggered on Pull Request from product repos.
 #
-# Jobs (in order):
-#   1. setup       → resolve working directory, set common env vars
-#   2. format      → terraform fmt -check (fails fast, no side effects)
-#   3. lint        → tflint with AWS ruleset
-#   4. validate    → terraform validate (requires init)
-#   5. plan        → terraform plan -out=tfplan, posts output as PR comment
+# DYNAMIC RESOLUTION (nothing hardcoded per environment):
 #
-# The saved plan artifact is uploaded and consumed by tf-cd.yml on merge.
-# This guarantees what the reviewer approved is exactly what gets applied.
+#   github.base_ref (target branch of PR) → environment
+#     dev     → runner: [self-hosted, terraform, dev]
+#               bucket: s3-aw-ue1-terraform-state-dev
+#     qa      → runner: [self-hosted, terraform, qa]
+#               bucket: s3-aw-ue1-terraform-state-qa
+#     preprod → runner: [self-hosted, terraform, preprod]
+#               bucket: s3-aw-ue1-terraform-state-preprod
+#     prod    → runner: [self-hosted, terraform, prod]
+#               bucket: s3-aw-ue1-terraform-state-prod
+#
+#   state key → {ou_name}/{repo_name}/terraform.tfstate
+#     ou_name  : comes from Port via workflow input
+#     repo_name: github.event.repository.name (automatic)
+#
+#   account_id: comes from Port via workflow input
+#
+# AUTH MODEL:
+#   Pod pivot role injected via IRSA (no explicit step needed).
+#   One assume-role: pivot → target account (account_id dynamic, role name constant).
+#
+# JOBS:
+#   1. resolve  → derives environment, bucket, state key, runner label
+#   2. format   → terraform fmt -check
+#   3. lint     → tflint with AWS ruleset
+#   4. plan     → terraform validate + plan, posts output as PR comment
 
 name: "[reusable] Terraform CI"
 
@@ -18,76 +36,121 @@ on:
   workflow_call:
     inputs:
       working_directory:
-        description: "Path to the Terraform environment directory. E.g. environments/dev"
+        description: "Path to Terraform files. E.g. environments/dev"
         required: true
         type: string
-      environment:
-        description: "Target environment: dev | qa | preprod | prod | dr"
+      account_id:
+        description: "AWS account ID for the target environment. Provided by Port."
+        required: true
+        type: string
+      ou_name:
+        description: "OU / product name used as the root folder in the state bucket. Provided by Port. E.g. nuevosnegocios"
         required: true
         type: string
       terraform_version:
-        description: "Terraform version. Defaults to latest 1.10.x."
         required: false
         type: string
         default: "1.10.5"
       tflint_version:
-        description: "TFLint version."
         required: false
         type: string
         default: "v0.55.0"
-
-
-    secrets:
-      # ── AWS (state backend — DevOps account) ──────────────────────────
-      DEVOPS_ACCOUNT_ID:
-        description: "DevOps AWS account ID. Used to build the state role ARN."
-        required: true
-      STATE_ROLE_NAME:
-        description: "IAM role name in DevOps account for S3 state access."
-        required: true
-      # ── S3 backend (passed from the product repo) ─────────────────────
-      TF_STATE_BUCKET:
-        description: "S3 bucket name where Terraform state lives."
-        required: true
-      TF_STATE_KEY:
-        description: "S3 key (path) for this environment's state file. E.g. networking/vpc/dev/terraform.tfstate"
-        required: true
-      TF_STATE_KMS_KEY_ID:
-        description: "KMS key ARN for state bucket encryption."
-        required: true
-      # ── Target account (read-only plan) ───────────────────────────────
-      TARGET_ACCOUNT_ID:
-        description: "AWS account ID where infra will be created."
-        required: true
-      TARGET_ROLE_NAME:
-        description: "IAM role name in the target account for Terraform plan (read-only permissions sufficient)."
-        required: true
+      target_role_name:
+        description: "IAM role name in the target account. Identical across all accounts."
+        required: false
+        type: string
+        default: "terraform-apply-role"
+      aws_region:
+        required: false
+        type: string
+        default: "us-east-1"
+      bucket_prefix:
+        description: "S3 bucket name prefix. Final name: {prefix}-{environment}"
+        required: false
+        type: string
+        default: "s3-aw-ue1-terraform-state"
 
     outputs:
       plan_exitcode:
-        description: "0 = no changes, 2 = changes present. CD uses this to skip apply if no changes."
+        description: "0=no changes, 2=changes present."
         value: ${{ jobs.plan.outputs.exitcode }}
       plan_artifact_name:
-        description: "Name of the uploaded plan artifact."
+        description: "Artifact name to pass to tf-cd.yml."
         value: ${{ jobs.plan.outputs.artifact_name }}
+      environment:
+        description: "Resolved environment name."
+        value: ${{ jobs.resolve.outputs.environment }}
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Concurrency — prevent two CI runs for the same PR + environment from
-#  racing. If a new push arrives, cancel the in-progress run.
-# ─────────────────────────────────────────────────────────────────────────────
 concurrency:
-  group: "tf-ci-${{ github.event.pull_request.number }}-${{ inputs.environment }}"
+  group: "tf-ci-${{ github.event.pull_request.number }}-${{ github.base_ref }}"
   cancel-in-progress: true
 
 jobs:
-  # ───────────────────────────────────────────
-  #  1. FORMAT
-  #  Fails immediately if any .tf file is not
-  #  formatted. No AWS credentials needed.
-  # ───────────────────────────────────────────
-  format:
-    name: "① Format check"
+  # ─────────────────────────────────────────────
+  #  RESOLVE
+  #  Derives all dynamic values from branch name.
+  #  All subsequent jobs consume these outputs.
+  # ─────────────────────────────────────────────
+  resolve:
+    name: "⓪ Resolve environment"
     runs-on: [self-hosted, terraform]
+
+    outputs:
+      environment:  ${{ steps.derive.outputs.environment }}
+      bucket:       ${{ steps.derive.outputs.bucket }}
+      state_key:    ${{ steps.derive.outputs.state_key }}
+      runner_label: ${{ steps.derive.outputs.runner_label }}
+
+    steps:
+      - name: Derive environment from branch
+        id: derive
+        run: |
+          # On PR events, use the target branch (base_ref).
+          # On push events, use the branch being pushed to (ref_name).
+          BRANCH="${{ github.base_ref || github.ref_name }}"
+          REPO="${{ github.event.repository.name }}"
+          OU="${{ inputs.ou_name }}"
+          PREFIX="${{ inputs.bucket_prefix }}"
+
+          case "$BRANCH" in
+            dev)     ENV="dev"     ;;
+            qa)      ENV="qa"      ;;
+            preprod) ENV="preprod" ;;
+            prod)    ENV="prod"    ;;
+            *)
+              echo "::error::Branch '$BRANCH' does not map to a known environment."
+              echo "::error::Expected one of: dev, qa, preprod, prod."
+              exit 1
+              ;;
+          esac
+
+          BUCKET="${PREFIX}-${ENV}"
+          STATE_KEY="${OU}/${REPO}/terraform.tfstate"
+          RUNNER_LABEL="terraform,${ENV}"
+
+          echo "environment=$ENV"        >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"          >> $GITHUB_OUTPUT
+          echo "state_key=$STATE_KEY"    >> $GITHUB_OUTPUT
+          echo "runner_label=$ENV"       >> $GITHUB_OUTPUT
+
+          echo "### ⓪ Resolved values" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |"        >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"               >> $GITHUB_STEP_SUMMARY
+          echo "| Branch     | \`$BRANCH\`     |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment| \`$ENV\`         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket     | \`$BUCKET\`      |" >> $GITHUB_STEP_SUMMARY
+          echo "| State key  | \`$STATE_KEY\`   |" >> $GITHUB_STEP_SUMMARY
+          echo "| Account ID | \`${{ inputs.account_id }}\` |" >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────────
+  #  FORMAT
+  # ─────────────────────────────────────────────
+  format:
+    name: "① Format"
+    needs: resolve
+    # Runner label is derived from the environment — no hardcoding.
+    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -97,22 +160,18 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
-      - name: Terraform fmt
-        id: fmt
+      - name: terraform fmt
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          terraform fmt -check -recursive -diff
-        # -diff prints exactly which lines need fixing — helpful for the dev
+        run: terraform fmt -check -recursive -diff
 
-  # ───────────────────────────────────────────
-  #  2. LINT
-  #  TFLint catches deprecated syntax, invalid
-  #  resource arguments, and AWS-specific rules
-  #  (e.g. invalid instance types, missing tags).
-  # ───────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  #  LINT
+  # ─────────────────────────────────────────────
   lint:
-    name: "② Lint (tflint)"
-    runs-on: [self-hosted, terraform]
+    name: "② Lint"
+    needs: resolve
+    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -122,7 +181,7 @@ jobs:
         with:
           tflint_version: ${{ inputs.tflint_version }}
 
-      - name: Init TFLint (download AWS ruleset plugin)
+      - name: Init TFLint
         working-directory: ${{ inputs.working_directory }}
         run: tflint --init
         env:
@@ -130,28 +189,19 @@ jobs:
 
       - name: Run TFLint
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          tflint \
-            --enable-plugin=aws \
-            --format=compact \
-            --recursive
+        run: tflint --enable-plugin=aws --format=compact --recursive
 
-  # ───────────────────────────────────────────
-  #  4. VALIDATE + PLAN
-  #  Requires AWS credentials to init the backend
-  #  and resolve provider schemas.
-  #  Plan output is posted as a PR comment and
-  #  the binary plan is saved as an artifact.
-  # ───────────────────────────────────────────
+  # ─────────────────────────────────────────────
+  #  VALIDATE + PLAN
+  # ─────────────────────────────────────────────
   plan:
-    name: "④ Validate + Plan"
-    runs-on: [self-hosted, terraform]
-    needs: [format, lint, security]
-    # Only runs if all previous gates pass.
+    name: "③ Validate + Plan"
+    needs: [resolve, format, lint]
+    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
 
     outputs:
       exitcode:      ${{ steps.plan.outputs.exitcode }}
-      artifact_name: ${{ steps.set_artifact_name.outputs.name }}
+      artifact_name: ${{ steps.artifact_name.outputs.value }}
 
     steps:
       - name: Checkout
@@ -162,30 +212,24 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
-          # wrapper=false so we can capture raw exit codes from plan
 
-      # ── Assume state role in DevOps account ──────────────────────────
-      - name: Configure AWS credentials (state role)
+      # One assume-role: IRSA pivot (already in pod) → target account.
+      - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}
-          aws-region: us-east-1
-          role-session-name: tf-ci-state-${{ inputs.environment }}-${{ github.run_id }}
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: "tf-ci-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
 
-      # ── Init with dynamic backend config ─────────────────────────────
-      # Backend values are passed as -backend-config flags (not hardcoded
-      # in backend.tf) so the same main.tf works for all environments.
       - name: Terraform init
         working-directory: ${{ inputs.working_directory }}
         run: |
           terraform init \
-            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=${{ secrets.TF_STATE_KEY }}" \
-            -backend-config="region=us-east-1" \
+            -backend-config="bucket=${{ needs.resolve.outputs.bucket }}" \
+            -backend-config="key=${{ needs.resolve.outputs.state_key }}" \
+            -backend-config="region=${{ inputs.aws_region }}" \
             -backend-config="encrypt=true" \
-            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY_ID }}" \
             -backend-config="use_lockfile=true" \
-            -backend-config="role_arn=arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}" \
             -input=false \
             -reconfigure
 
@@ -193,17 +237,6 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         run: terraform validate
 
-      # ── Assume apply role in target account for plan ──────────────────
-      # Plan only needs read permissions. The apply role is reused here
-      # because it already has the minimum required read access.
-      - name: Configure AWS credentials (target account)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.TARGET_ACCOUNT_ID }}:role/${{ secrets.TARGET_ROLE_NAME }}
-          aws-region: us-east-1
-          role-session-name: tf-ci-plan-${{ inputs.environment }}-${{ github.run_id }}
-
-      # ── Plan ─────────────────────────────────────────────────────────
       - name: Terraform plan
         id: plan
         working-directory: ${{ inputs.working_directory }}
@@ -217,86 +250,87 @@ jobs:
             2>&1 | tee plan_output.txt
           EXITCODE=${PIPESTATUS[0]}
           echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
-
-          # exitcode 0 = no changes, 1 = error, 2 = changes present
           if [ "$EXITCODE" -eq "1" ]; then
-            echo "::error::Terraform plan failed. See output above."
+            echo "::error::Terraform plan failed."
             exit 1
           fi
           exit 0
 
-      # ── Post plan output as PR comment ────────────────────────────────
       - name: Post plan to PR
         uses: actions/github-script@v7
         if: github.event_name == 'pull_request'
         with:
           github-token: ${{ github.token }}
           script: |
-            const fs = require('fs');
-            const planOutput = fs.readFileSync('${{ inputs.working_directory }}/plan_output.txt', 'utf8');
-            const maxLen = 65000;
-            const truncated = planOutput.length > maxLen
-              ? planOutput.slice(0, maxLen) + '\n\n⚠️ Output truncated — see full log in Actions.'
-              : planOutput;
+            const fs  = require('fs');
+            const raw = fs.readFileSync('${{ inputs.working_directory }}/plan_output.txt', 'utf8');
+            const MAX = 65000;
+            const planText = raw.length > MAX
+              ? raw.slice(0, MAX) + '\n\n⚠️ Output truncated — see Actions for full log.'
+              : raw;
 
-            const exitcode = '${{ steps.plan.outputs.exitcode }}';
-            const statusIcon = exitcode === '0' ? '✅ No changes' : '⚠️ Changes detected';
-            const env = '${{ inputs.environment }}';
+            const exitcode  = '${{ steps.plan.outputs.exitcode }}';
+            const noChanges = exitcode === '0';
+            const env       = '${{ needs.resolve.outputs.environment }}';
+            const bucket    = '${{ needs.resolve.outputs.bucket }}';
+            const stateKey  = '${{ needs.resolve.outputs.state_key }}';
+            const sha       = '${{ github.sha }}'.slice(0, 7);
 
             const body = [
-              `## 🔍 Terraform Plan — \`${env}\` ${statusIcon}`,
+              `## 🔍 Terraform Plan — \`${env}\` ${noChanges ? '✅ No changes' : '⚠️ Changes detected'}`,
               '',
               '| | |',
               '|---|---|',
-              `| **Environment** | \`${env}\` |`,
-              `| **Directory** | \`${{ inputs.working_directory }}\` |`,
+              `| **Environment**  | \`${env}\` |`,
+              `| **Account ID**   | \`${{ inputs.account_id }}\` |`,
+              `| **Directory**    | \`${{ inputs.working_directory }}\` |`,
+              `| **State bucket** | \`${bucket}\` |`,
+              `| **State key**    | \`${stateKey}\` |`,
+              `| **Commit**       | \`${sha}\` |`,
               `| **Triggered by** | @${{ github.actor }} |`,
-              `| **Commit** | \`${{ github.sha }}\`.slice(0,7) |`,
               '',
-              '<details><summary>📋 Full plan output (click to expand)</summary>',
+              noChanges
+                ? '> ℹ️ No infrastructure changes. Apply will be skipped in CD.'
+                : '> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan.',
+              '',
+              '<details><summary>📋 Plan output (expand)</summary>',
               '',
               '```hcl',
-              truncated,
+              planText,
               '```',
               '</details>',
-              '',
-              '> ⚡ This plan will be applied exactly as-is after merge. No re-plan will occur.',
             ].join('\n');
 
-            // Delete previous plan comment if exists (keep PR clean)
             const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: context.repo.owner, repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-            for (const comment of comments) {
-              if (comment.body.includes('Terraform Plan') && comment.body.includes(env)) {
+            for (const c of comments) {
+              if (c.user.type === 'Bot'
+                && c.body.includes('Terraform Plan')
+                && c.body.includes(`\`${env}\``)) {
                 await github.rest.issues.deleteComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  comment_id: comment.id,
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  comment_id: c.id,
                 });
               }
             }
-
             await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, body,
             });
 
-      # ── Upload plan binary ────────────────────────────────────────────
-      - name: Set artifact name
-        id: set_artifact_name
+      - name: Build artifact name
+        id: artifact_name
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          echo "name=tfplan-${{ inputs.environment }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          ENV="${{ needs.resolve.outputs.environment }}"
+          echo "value=tfplan-${ENV}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Upload plan artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.set_artifact_name.outputs.name }}
+          name: ${{ steps.artifact_name.outputs.value }}
           path: |
             ${{ inputs.working_directory }}/tfplan
             ${{ inputs.working_directory }}/plan_output.txt
