@@ -1,0 +1,304 @@
+# ORG-DEVOPS/.github/workflows/tf-ci.yml
+#
+# Reusable CI workflow — called by every product repo on Pull Request.
+#
+# Jobs (in order):
+#   1. setup       → resolve working directory, set common env vars
+#   2. format      → terraform fmt -check (fails fast, no side effects)
+#   3. lint        → tflint with AWS ruleset
+#   4. validate    → terraform validate (requires init)
+#   5. plan        → terraform plan -out=tfplan, posts output as PR comment
+#
+# The saved plan artifact is uploaded and consumed by tf-cd.yml on merge.
+# This guarantees what the reviewer approved is exactly what gets applied.
+
+name: "[reusable] Terraform CI"
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: "Path to the Terraform environment directory. E.g. environments/dev"
+        required: true
+        type: string
+      environment:
+        description: "Target environment: dev | qa | preprod | prod | dr"
+        required: true
+        type: string
+      terraform_version:
+        description: "Terraform version. Defaults to latest 1.10.x."
+        required: false
+        type: string
+        default: "1.10.5"
+      tflint_version:
+        description: "TFLint version."
+        required: false
+        type: string
+        default: "v0.55.0"
+
+
+    secrets:
+      # ── AWS (state backend — DevOps account) ──────────────────────────
+      DEVOPS_ACCOUNT_ID:
+        description: "DevOps AWS account ID. Used to build the state role ARN."
+        required: true
+      STATE_ROLE_NAME:
+        description: "IAM role name in DevOps account for S3 state access."
+        required: true
+      # ── S3 backend (passed from the product repo) ─────────────────────
+      TF_STATE_BUCKET:
+        description: "S3 bucket name where Terraform state lives."
+        required: true
+      TF_STATE_KEY:
+        description: "S3 key (path) for this environment's state file. E.g. networking/vpc/dev/terraform.tfstate"
+        required: true
+      TF_STATE_KMS_KEY_ID:
+        description: "KMS key ARN for state bucket encryption."
+        required: true
+      # ── Target account (read-only plan) ───────────────────────────────
+      TARGET_ACCOUNT_ID:
+        description: "AWS account ID where infra will be created."
+        required: true
+      TARGET_ROLE_NAME:
+        description: "IAM role name in the target account for Terraform plan (read-only permissions sufficient)."
+        required: true
+
+    outputs:
+      plan_exitcode:
+        description: "0 = no changes, 2 = changes present. CD uses this to skip apply if no changes."
+        value: ${{ jobs.plan.outputs.exitcode }}
+      plan_artifact_name:
+        description: "Name of the uploaded plan artifact."
+        value: ${{ jobs.plan.outputs.artifact_name }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Concurrency — prevent two CI runs for the same PR + environment from
+#  racing. If a new push arrives, cancel the in-progress run.
+# ─────────────────────────────────────────────────────────────────────────────
+concurrency:
+  group: "tf-ci-${{ github.event.pull_request.number }}-${{ inputs.environment }}"
+  cancel-in-progress: true
+
+jobs:
+  # ───────────────────────────────────────────
+  #  1. FORMAT
+  #  Fails immediately if any .tf file is not
+  #  formatted. No AWS credentials needed.
+  # ───────────────────────────────────────────
+  format:
+    name: "① Format check"
+    runs-on: [self-hosted, terraform]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform fmt
+        id: fmt
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          terraform fmt -check -recursive -diff
+        # -diff prints exactly which lines need fixing — helpful for the dev
+
+  # ───────────────────────────────────────────
+  #  2. LINT
+  #  TFLint catches deprecated syntax, invalid
+  #  resource arguments, and AWS-specific rules
+  #  (e.g. invalid instance types, missing tags).
+  # ───────────────────────────────────────────
+  lint:
+    name: "② Lint (tflint)"
+    runs-on: [self-hosted, terraform]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ inputs.tflint_version }}
+
+      - name: Init TFLint (download AWS ruleset plugin)
+        working-directory: ${{ inputs.working_directory }}
+        run: tflint --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Run TFLint
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          tflint \
+            --enable-plugin=aws \
+            --format=compact \
+            --recursive
+
+  # ───────────────────────────────────────────
+  #  4. VALIDATE + PLAN
+  #  Requires AWS credentials to init the backend
+  #  and resolve provider schemas.
+  #  Plan output is posted as a PR comment and
+  #  the binary plan is saved as an artifact.
+  # ───────────────────────────────────────────
+  plan:
+    name: "④ Validate + Plan"
+    runs-on: [self-hosted, terraform]
+    needs: [format, lint, security]
+    # Only runs if all previous gates pass.
+
+    outputs:
+      exitcode:      ${{ steps.plan.outputs.exitcode }}
+      artifact_name: ${{ steps.set_artifact_name.outputs.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+          # wrapper=false so we can capture raw exit codes from plan
+
+      # ── Assume state role in DevOps account ──────────────────────────
+      - name: Configure AWS credentials (state role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}
+          aws-region: us-east-1
+          role-session-name: tf-ci-state-${{ inputs.environment }}-${{ github.run_id }}
+
+      # ── Init with dynamic backend config ─────────────────────────────
+      # Backend values are passed as -backend-config flags (not hardcoded
+      # in backend.tf) so the same main.tf works for all environments.
+      - name: Terraform init
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.TF_STATE_KEY }}" \
+            -backend-config="region=us-east-1" \
+            -backend-config="encrypt=true" \
+            -backend-config="kms_key_id=${{ secrets.TF_STATE_KMS_KEY_ID }}" \
+            -backend-config="use_lockfile=true" \
+            -backend-config="role_arn=arn:aws:iam::${{ secrets.DEVOPS_ACCOUNT_ID }}:role/${{ secrets.STATE_ROLE_NAME }}" \
+            -input=false \
+            -reconfigure
+
+      - name: Terraform validate
+        working-directory: ${{ inputs.working_directory }}
+        run: terraform validate
+
+      # ── Assume apply role in target account for plan ──────────────────
+      # Plan only needs read permissions. The apply role is reused here
+      # because it already has the minimum required read access.
+      - name: Configure AWS credentials (target account)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.TARGET_ACCOUNT_ID }}:role/${{ secrets.TARGET_ROLE_NAME }}
+          aws-region: us-east-1
+          role-session-name: tf-ci-plan-${{ inputs.environment }}-${{ github.run_id }}
+
+      # ── Plan ─────────────────────────────────────────────────────────
+      - name: Terraform plan
+        id: plan
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          set +e
+          terraform plan \
+            -var-file=terraform.tfvars \
+            -out=tfplan \
+            -input=false \
+            -detailed-exitcode \
+            2>&1 | tee plan_output.txt
+          EXITCODE=${PIPESTATUS[0]}
+          echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
+
+          # exitcode 0 = no changes, 1 = error, 2 = changes present
+          if [ "$EXITCODE" -eq "1" ]; then
+            echo "::error::Terraform plan failed. See output above."
+            exit 1
+          fi
+          exit 0
+
+      # ── Post plan output as PR comment ────────────────────────────────
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('${{ inputs.working_directory }}/plan_output.txt', 'utf8');
+            const maxLen = 65000;
+            const truncated = planOutput.length > maxLen
+              ? planOutput.slice(0, maxLen) + '\n\n⚠️ Output truncated — see full log in Actions.'
+              : planOutput;
+
+            const exitcode = '${{ steps.plan.outputs.exitcode }}';
+            const statusIcon = exitcode === '0' ? '✅ No changes' : '⚠️ Changes detected';
+            const env = '${{ inputs.environment }}';
+
+            const body = [
+              `## 🔍 Terraform Plan — \`${env}\` ${statusIcon}`,
+              '',
+              '| | |',
+              '|---|---|',
+              `| **Environment** | \`${env}\` |`,
+              `| **Directory** | \`${{ inputs.working_directory }}\` |`,
+              `| **Triggered by** | @${{ github.actor }} |`,
+              `| **Commit** | \`${{ github.sha }}\`.slice(0,7) |`,
+              '',
+              '<details><summary>📋 Full plan output (click to expand)</summary>',
+              '',
+              '```hcl',
+              truncated,
+              '```',
+              '</details>',
+              '',
+              '> ⚡ This plan will be applied exactly as-is after merge. No re-plan will occur.',
+            ].join('\n');
+
+            // Delete previous plan comment if exists (keep PR clean)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            for (const comment of comments) {
+              if (comment.body.includes('Terraform Plan') && comment.body.includes(env)) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      # ── Upload plan binary ────────────────────────────────────────────
+      - name: Set artifact name
+        id: set_artifact_name
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "name=tfplan-${{ inputs.environment }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set_artifact_name.outputs.name }}
+          path: |
+            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/plan_output.txt
+          retention-days: 5
+          if-no-files-found: error
