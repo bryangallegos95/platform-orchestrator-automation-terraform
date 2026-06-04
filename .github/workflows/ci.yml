@@ -1,4 +1,4 @@
-# ORG-DEVOPS/.github/workflows/tf-ci.yml
+# ORG-DEVOPS/.github/workflows/ci.yml
 #
 # Reusable CI workflow — triggered on Pull Request from product repos.
 #
@@ -13,12 +13,22 @@
 #               bucket: s3-aw-ue1-terraform-state-preprod
 #     prod    → runner: [self-hosted, terraform, prod]
 #               bucket: s3-aw-ue1-terraform-state-prod
+#     dr      → runner: [self-hosted, terraform, dr]
+#               bucket: s3-aw-ue1-terraform-state-dr
 #
 #   state key → {ou_name}/{repo_name}/terraform.tfstate
-#     ou_name  : comes from Port via workflow input
+#     ou_name  : comes from Port via workflow input (= service name)
 #     repo_name: github.event.repository.name (automatic)
 #
 #   account_id: comes from Port via workflow input
+#
+# DYNAMIC VARS (extra_vars input):
+#   Son repos pass tgw_id, service, ambiente as -var flags so they
+#   never need to be hardcoded in terraform.tfvars.
+#   tgw_id  → read from org-level GitHub Variable TGW_HUB_ID in the son repo
+#   service → = ou_name (passed by Port)
+#   ambiente→ derived from branch name (automatic)
+#   Format: "key1=value1 key2=value2"
 #
 # AUTH MODEL:
 #   Pod pivot role injected via IRSA (no explicit step needed).
@@ -44,9 +54,18 @@ on:
         required: true
         type: string
       ou_name:
-        description: "OU / product name used as the root folder in the state bucket. Provided by Port. E.g. nuevosnegocios"
+        description: "OU / product name used as the root folder in the state bucket. Provided by Port. E.g. datosanalitica"
         required: true
         type: string
+      extra_vars:
+        description: |
+          Optional space-separated list of Terraform -var overrides.
+          These are injected at plan time and take precedence over terraform.tfvars.
+          Format: "key1=value1 key2=value2"
+          Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
+        required: false
+        type: string
+        default: ""
       terraform_version:
         required: false
         type: string
@@ -75,7 +94,7 @@ on:
         description: "0=no changes, 2=changes present."
         value: ${{ jobs.plan.outputs.exitcode }}
       plan_artifact_name:
-        description: "Artifact name to pass to tf-cd.yml."
+        description: "Artifact name to pass to cd.yml."
         value: ${{ jobs.plan.outputs.artifact_name }}
       environment:
         description: "Resolved environment name."
@@ -117,16 +136,16 @@ jobs:
             qa)      ENV="qa"      ;;
             preprod) ENV="preprod" ;;
             prod)    ENV="prod"    ;;
+            dr)      ENV="dr"      ;;
             *)
               echo "::error::Branch '$BRANCH' does not map to a known environment."
-              echo "::error::Expected one of: dev, qa, preprod, prod."
+              echo "::error::Expected one of: dev, qa, preprod, prod, dr."
               exit 1
               ;;
           esac
 
           BUCKET="${PREFIX}-${ENV}"
           STATE_KEY="${OU}/${REPO}/terraform.tfstate"
-          RUNNER_LABEL="terraform,${ENV}"
 
           echo "environment=$ENV"        >> $GITHUB_OUTPUT
           echo "bucket=$BUCKET"          >> $GITHUB_OUTPUT
@@ -136,11 +155,12 @@ jobs:
           echo "### ⓪ Resolved values" >> $GITHUB_STEP_SUMMARY
           echo "| Key | Value |"        >> $GITHUB_STEP_SUMMARY
           echo "|---|---|"               >> $GITHUB_STEP_SUMMARY
-          echo "| Branch     | \`$BRANCH\`     |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment| \`$ENV\`         |" >> $GITHUB_STEP_SUMMARY
-          echo "| Bucket     | \`$BUCKET\`      |" >> $GITHUB_STEP_SUMMARY
-          echo "| State key  | \`$STATE_KEY\`   |" >> $GITHUB_STEP_SUMMARY
-          echo "| Account ID | \`${{ inputs.account_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch      | \`$BRANCH\`     |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`$ENV\`         |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket      | \`$BUCKET\`      |" >> $GITHUB_STEP_SUMMARY
+          echo "| State key   | \`$STATE_KEY\`   |" >> $GITHUB_STEP_SUMMARY
+          echo "| Account ID  | \`${{ inputs.account_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Extra vars  | \`${{ inputs.extra_vars }}\` |" >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
   #  FORMAT
@@ -148,7 +168,6 @@ jobs:
   format:
     name: "① Format"
     needs: resolve
-    # Runner label is derived from the environment — no hardcoding.
     runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
 
     steps:
@@ -241,9 +260,21 @@ jobs:
         id: plan
         working-directory: ${{ inputs.working_directory }}
         run: |
+          # Build -var flags from the extra_vars input.
+          # Each space-separated key=value pair becomes a separate -var flag.
+          # These override anything in terraform.tfvars and inject:
+          #   tgw_id   → from org variable TGW_HUB_ID (never in tfvars)
+          #   service  → ou_name from Port (never hardcoded in son repo)
+          #   ambiente → branch-derived (never hardcoded in son repo)
+          EXTRA_VAR_FLAGS=""
+          for pair in ${{ inputs.extra_vars }}; do
+            EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
+          done
+
           set +e
-          terraform plan \
+          eval terraform plan \
             -var-file=terraform.tfvars \
+            $EXTRA_VAR_FLAGS \
             -out=tfplan \
             -input=false \
             -detailed-exitcode \
@@ -286,6 +317,7 @@ jobs:
               `| **Directory**    | \`${{ inputs.working_directory }}\` |`,
               `| **State bucket** | \`${bucket}\` |`,
               `| **State key**    | \`${stateKey}\` |`,
+              `| **Extra vars**   | \`${{ inputs.extra_vars }}\` |`,
               `| **Commit**       | \`${sha}\` |`,
               `| **Triggered by** | @${{ github.actor }} |`,
               '',
