@@ -1,11 +1,16 @@
-# ORG-DEVOPS/.github/workflows/tf-cd.yml
+# ORG-DEVOPS/.github/workflows/cd.yml
 #
 # Reusable CD workflow — triggered on push to environment branches.
 #
-# DYNAMIC RESOLUTION (same logic as tf-ci.yml):
+# DYNAMIC RESOLUTION (same logic as ci.yml):
 #   github.ref_name → environment → runner label + state bucket
 #   ou_name + repo_name → state key
 #   account_id → assume-role ARN
+#
+# DYNAMIC VARS (extra_vars input):
+#   Son repos pass tgw_id, service, ambiente as -var flags so they
+#   never need to be hardcoded in terraform.tfvars.
+#   Format: "key1=value1 key2=value2"
 #
 # KEY BEHAVIORS:
 #   - Downloads exact plan artifact from CI (same SHA). No re-plan.
@@ -30,13 +35,22 @@ on:
         required: true
         type: string
       plan_artifact_name:
-        description: "Exact artifact name from tf-ci.yml output."
+        description: "Exact artifact name from ci.yml output."
         required: true
         type: string
       plan_exitcode:
         description: "Exit code from CI plan. 0=no changes → skip apply."
         required: true
         type: string
+      extra_vars:
+        description: |
+          Optional space-separated list of Terraform -var overrides.
+          Must match exactly what was passed to ci.yml so the saved plan is valid.
+          Format: "key1=value1 key2=value2"
+          Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
+        required: false
+        type: string
+        default: ""
       terraform_version:
         required: false
         type: string
@@ -103,6 +117,7 @@ jobs:
             qa)      ENV="qa"      ;;
             preprod) ENV="preprod" ;;
             prod)    ENV="prod"    ;;
+            dr)      ENV="dr"      ;;
             *)
               echo "::error::Branch '$BRANCH' does not map to a known environment."
               exit 1
@@ -125,6 +140,7 @@ jobs:
           echo "| Bucket      | \`$BUCKET\`                    |"  >> $GITHUB_STEP_SUMMARY
           echo "| State key   | \`$STATE_KEY\`                 |"  >> $GITHUB_STEP_SUMMARY
           echo "| Account ID  | \`${{ inputs.account_id }}\`   |"  >> $GITHUB_STEP_SUMMARY
+          echo "| Extra vars  | \`${{ inputs.extra_vars }}\`   |"  >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
   #  APPLY
@@ -216,6 +232,8 @@ jobs:
           path: ${{ inputs.working_directory }}
 
       # ── 7. Apply ─────────────────────────────────────────────────────
+      # NOTE: We apply the saved tfplan binary — no -var flags needed here.
+      # The plan already has all variable values baked in from the CI step.
       - name: Terraform apply
         id: apply
         if: inputs.plan_exitcode != '0'
@@ -242,7 +260,17 @@ jobs:
           echo "Resources in state:"
           terraform state list || true
           set +e
-          terraform destroy -var-file=terraform.tfvars -input=false -auto-approve
+
+          # Build -var flags for destroy (same vars used in plan).
+          EXTRA_VAR_FLAGS=""
+          for pair in ${{ inputs.extra_vars }}; do
+            EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
+          done
+
+          eval terraform destroy \
+            -var-file=terraform.tfvars \
+            $EXTRA_VAR_FLAGS \
+            -input=false -auto-approve
           CODE=$?
           if [ $CODE -ne 0 ]; then
             echo "ROLLBACK_OUTCOME=failed" >> $GITHUB_ENV
@@ -290,15 +318,16 @@ jobs:
 
           | Field | Value |
           |---|---|
-          | **Status**      | ${STATUS} |
-          | **Environment** | \`${ENV}\` |
-          | **Account ID**  | \`${{ inputs.account_id }}\` |
-          | **Directory**   | \`${{ inputs.working_directory }}\` |
-          | **State**       | \`s3://${BUCKET}/${KEY}\` |
+          | **Status**       | ${STATUS} |
+          | **Environment**  | \`${ENV}\` |
+          | **Account ID**   | \`${{ inputs.account_id }}\` |
+          | **Directory**    | \`${{ inputs.working_directory }}\` |
+          | **State**        | \`s3://${BUCKET}/${KEY}\` |
+          | **Extra vars**   | \`${{ inputs.extra_vars }}\` |
           | **Plan artifact**| \`${{ inputs.plan_artifact_name }}\` |
-          | **Triggered by**| @${{ github.actor }} |
-          | **Commit**      | \`${{ github.sha }}\` |
-          | **Run**         | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          | **Triggered by** | @${{ github.actor }} |
+          | **Commit**       | \`${{ github.sha }}\` |
+          | **Run**          | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
           EOF
 
       # ── 10. Set output + fail if needed ──────────────────────────────
