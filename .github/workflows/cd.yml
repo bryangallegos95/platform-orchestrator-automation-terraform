@@ -2,20 +2,10 @@
 #
 # Reusable CD workflow — triggered on push to environment branches.
 #
-# DYNAMIC RESOLUTION (same logic as ci.yml):
-#   github.ref_name → environment → runner label + state bucket
-#   ou_name + repo_name → state key
-#   account_id → assume-role ARN
-#
-# DYNAMIC VARS (extra_vars input):
-#   Son repos pass tgw_id, service, ambiente as -var flags so they
-#   never need to be hardcoded in terraform.tfvars.
-#   Format: "key1=value1 key2=value2"
-#
 # KEY BEHAVIORS:
 #   - Downloads exact plan artifact from CI (same SHA). No re-plan.
 #   - plan_exitcode=0 → apply skipped entirely.
-#   - Apply failure → auto destroy (dev/qa) or alert-only (preprod/prod).
+#   - Apply failure → auto destroy (dev/qa) or alert-only (preprod/prod/dr).
 #   - One apply per environment at a time (concurrency queue).
 
 name: "[reusable] Terraform CD"
@@ -27,27 +17,22 @@ on:
         required: true
         type: string
       account_id:
-        description: "AWS account ID. Provided by Port."
         required: true
         type: string
       ou_name:
-        description: "OU / product name. Provided by Port. E.g. nuevosnegocios"
         required: true
         type: string
       plan_artifact_name:
-        description: "Exact artifact name from ci.yml output."
         required: true
         type: string
       plan_exitcode:
-        description: "Exit code from CI plan. 0=no changes → skip apply."
         required: true
         type: string
       extra_vars:
         description: |
-          Optional space-separated list of Terraform -var overrides.
-          Must match exactly what was passed to ci.yml so the saved plan is valid.
-          Format: "key1=value1 key2=value2"
-          Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
+          Space-separated Terraform -var overrides.
+          Must match exactly what was passed to ci.yml.
+          Used only for rollback destroy — apply uses the saved plan binary.
         required: false
         type: string
         default: ""
@@ -55,6 +40,10 @@ on:
         required: false
         type: string
         default: "1.10.5"
+      terragrunt_version:
+        required: false
+        type: string
+        default: "0.69.10"
       target_role_name:
         required: false
         type: string
@@ -68,12 +57,10 @@ on:
         type: string
         default: "s3-aw-ue1-terraform-state"
       change_window_start_utc:
-        description: "Change window open hour UTC. Default 12 = 07:00 ECT."
         required: false
         type: string
         default: "12"
       change_window_end_utc:
-        description: "Change window close hour UTC. Default 22 = 17:00 ECT."
         required: false
         type: string
         default: "22"
@@ -85,13 +72,11 @@ on:
 
 concurrency:
   group: "tf-cd-${{ github.ref_name }}-${{ inputs.ou_name }}"
-  cancel-in-progress: false   # queue — never cancel a running apply
+  cancel-in-progress: false
 
 jobs:
   # ─────────────────────────────────────────────
   #  RESOLVE
-  #  Same derivation logic as CI.
-  #  CD runs on push, so we use github.ref_name.
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve environment"
@@ -120,8 +105,7 @@ jobs:
             dr)      ENV="dr"      ;;
             *)
               echo "::error::Branch '$BRANCH' does not map to a known environment."
-              exit 1
-              ;;
+              exit 1 ;;
           esac
 
           BUCKET="${PREFIX}-${ENV}"
@@ -132,15 +116,14 @@ jobs:
           echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
           echo "runner_label=$ENV"    >> $GITHUB_OUTPUT
 
-          echo "### ⓪ Resolved values"                             >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |"                                    >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|"                                           >> $GITHUB_STEP_SUMMARY
-          echo "| Branch      | \`$BRANCH\`                    |"  >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`$ENV\`                       |"  >> $GITHUB_STEP_SUMMARY
-          echo "| Bucket      | \`$BUCKET\`                    |"  >> $GITHUB_STEP_SUMMARY
-          echo "| State key   | \`$STATE_KEY\`                 |"  >> $GITHUB_STEP_SUMMARY
-          echo "| Account ID  | \`${{ inputs.account_id }}\`   |"  >> $GITHUB_STEP_SUMMARY
-          echo "| Extra vars  | \`${{ inputs.extra_vars }}\`   |"  >> $GITHUB_STEP_SUMMARY
+          echo "### ⓪ Resolved values"                           >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |"                                  >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                                         >> $GITHUB_STEP_SUMMARY
+          echo "| Branch      | \`$BRANCH\`   |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`$ENV\`       |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket      | \`$BUCKET\`    |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| State key   | \`$STATE_KEY\` |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Account ID  | \`${{ inputs.account_id }}\` |"  >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
   #  APPLY
@@ -150,7 +133,6 @@ jobs:
     needs: resolve
     runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
     environment: ${{ needs.resolve.outputs.environment }}
-    # ↑ GitHub Environment protection rules enforce approval for qa/preprod/prod.
 
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
@@ -160,13 +142,13 @@ jobs:
       ROLLBACK_OUTCOME: "n/a"
 
     steps:
-      # ── 0. Skip guard ────────────────────────────────────────────────
+      # ── 0. Skip guard ──────────────────────────────────────────────────
       - name: "Skip — no changes"
         if: inputs.plan_exitcode == '0'
         run: |
           echo "::notice::Plan exitcode=0. Apply skipped for '${{ needs.resolve.outputs.environment }}'."
 
-      # ── 1. Change window (prod only) ─────────────────────────────────
+      # ── 1. Change window (prod only) ───────────────────────────────────
       - name: Change window check
         if: |
           inputs.plan_exitcode != '0' &&
@@ -176,7 +158,6 @@ jobs:
           DAY=$(date -u +%u)
           START=${{ inputs.change_window_start_utc }}
           END=${{ inputs.change_window_end_utc }}
-          echo "UTC now: $(date -u)  |  Window: Mon–Fri ${START}:00–${END}:00 UTC"
           if [[ $DAY -ge 6 ]]; then
             echo "::error::❌ Weekend deployments to prod are not allowed."
             exit 1
@@ -187,12 +168,12 @@ jobs:
           fi
           echo "✅ Within change window."
 
-      # ── 2. Checkout ──────────────────────────────────────────────────
+      # ── 2. Checkout ────────────────────────────────────────────────────
       - name: Checkout
         if: inputs.plan_exitcode != '0'
         uses: actions/checkout@v4
 
-      # ── 3. Setup Terraform ───────────────────────────────────────────
+      # ── 3. Setup Terraform + Terragrunt ────────────────────────────────
       - name: Setup Terraform
         if: inputs.plan_exitcode != '0'
         uses: hashicorp/setup-terraform@v3
@@ -200,7 +181,14 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      # ── 4. Assume role: IRSA pivot → target account ──────────────────
+      - name: Setup Terragrunt
+        if: inputs.plan_exitcode != '0'
+        run: |
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      # ── 4. Assume role ─────────────────────────────────────────────────
       - name: Assume role in target account
         if: inputs.plan_exitcode != '0'
         uses: aws-actions/configure-aws-credentials@v4
@@ -209,21 +197,15 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
           role-session-name: "tf-cd-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
 
-      # ── 5. Init ──────────────────────────────────────────────────────
-      - name: Terraform init
+      # ── 5. Init ────────────────────────────────────────────────────────
+      - name: Terragrunt init
         if: inputs.plan_exitcode != '0'
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ needs.resolve.outputs.bucket }}" \
-            -backend-config="key=${{ needs.resolve.outputs.state_key }}" \
-            -backend-config="region=${{ inputs.aws_region }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" \
-            -input=false \
-            -reconfigure
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
 
-      # ── 6. Download saved plan from CI ───────────────────────────────
+      # ── 6. Download saved plan from CI ─────────────────────────────────
       - name: Download plan artifact
         if: inputs.plan_exitcode != '0'
         uses: actions/download-artifact@v4
@@ -231,46 +213,46 @@ jobs:
           name: ${{ inputs.plan_artifact_name }}
           path: ${{ inputs.working_directory }}
 
-      # ── 7. Apply ─────────────────────────────────────────────────────
-      # NOTE: We apply the saved tfplan binary — no -var flags needed here.
-      # The plan already has all variable values baked in from the CI step.
-      - name: Terraform apply
+      # ── 7. Apply ───────────────────────────────────────────────────────
+      # NOTE: No -var flags needed — the saved tfplan binary already has
+      # all variable values baked in from the CI plan step.
+      - name: Terragrunt apply
         id: apply
         if: inputs.plan_exitcode != '0'
         working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
           set +e
-          terraform apply -input=false -auto-approve tfplan
+          terragrunt apply -input=false -auto-approve tfplan
           CODE=$?
           if [ $CODE -ne 0 ]; then
             echo "APPLY_FAILED=true" >> $GITHUB_ENV
-            echo "::error::❌ terraform apply failed (exit $CODE)."
+            echo "::error::❌ terragrunt apply failed (exit $CODE)."
           fi
-          exit 0   # let rollback steps always run
+          exit 0
 
-      # ── 8a. Rollback — auto destroy (dev / qa) ────────────────────────
+      # ── 8a. Rollback — auto destroy (dev/qa) ───────────────────────────
       - name: "Rollback — auto destroy (dev/qa)"
         if: |
           env.APPLY_FAILED == 'true' &&
           (needs.resolve.outputs.environment == 'dev' ||
            needs.resolve.outputs.environment == 'qa')
         working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
           echo "::warning::⚠️ Apply failed. Running automatic rollback."
-          echo "Resources in state:"
           terraform state list || true
           set +e
 
-          # Build -var flags for destroy (same vars used in plan).
+          # Build -var flags — needed for destroy since it re-evaluates variables.
           EXTRA_VAR_FLAGS=""
           for pair in ${{ inputs.extra_vars }}; do
             EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
           done
 
-          eval terraform destroy \
-            -var-file=terraform.tfvars \
-            $EXTRA_VAR_FLAGS \
-            -input=false -auto-approve
+          eval terragrunt destroy $EXTRA_VAR_FLAGS -input=false -auto-approve
           CODE=$?
           if [ $CODE -ne 0 ]; then
             echo "ROLLBACK_OUTCOME=failed" >> $GITHUB_ENV
@@ -281,62 +263,57 @@ jobs:
             echo "✅ Rollback complete."
           fi
 
-      # ── 8b. Rollback — alert only (preprod / prod) ───────────────────
-      - name: "Rollback — alert only (preprod/prod)"
+      # ── 8b. Rollback — alert only (preprod/prod/dr) ────────────────────
+      - name: "Rollback — alert only (preprod/prod/dr)"
         if: |
           env.APPLY_FAILED == 'true' &&
           (needs.resolve.outputs.environment == 'preprod' ||
-           needs.resolve.outputs.environment == 'prod')
+           needs.resolve.outputs.environment == 'prod'    ||
+           needs.resolve.outputs.environment == 'dr')
         run: |
           echo "ROLLBACK_OUTCOME=blocked" >> $GITHUB_ENV
           echo "::error::❌ Apply failed in '${{ needs.resolve.outputs.environment }}'."
           echo "::error::Automatic destroy DISABLED for production-tier environments."
-          echo "::error::ACTION REQUIRED:"
           echo "::error::  A) Fix-forward — push a corrected PR."
-          echo "::error::  B) Manual destroy — run terraform destroy with your credentials."
+          echo "::error::  B) Manual destroy — run terragrunt destroy with your credentials."
           echo "::error::State: s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}"
 
-      # ── 9. Job summary ────────────────────────────────────────────────
+      # ── 9. Job summary ─────────────────────────────────────────────────
       - name: Write job summary
         if: always() && inputs.plan_exitcode != '0'
         run: |
           case "$APPLY_FAILED-$ROLLBACK_OUTCOME" in
-            "false-n/a")      STATUS="✅ Success";                       OUTCOME="success"     ;;
-            "true-success")   STATUS="🔄 Failed → rolled back";          OUTCOME="rolled_back" ;;
-            "true-failed")    STATUS="💥 Failed → rollback failed";       OUTCOME="failed"      ;;
-            "true-blocked")   STATUS="🚨 Failed → manual action required"; OUTCOME="failed"    ;;
-            *)                STATUS="⚠️ Unknown";                        OUTCOME="failed"      ;;
+            "false-n/a")    STATUS="✅ Success";                       OUTCOME="success"     ;;
+            "true-success") STATUS="🔄 Failed → rolled back";          OUTCOME="rolled_back" ;;
+            "true-failed")  STATUS="💥 Failed → rollback failed";      OUTCOME="failed"      ;;
+            "true-blocked") STATUS="🚨 Failed → manual action needed"; OUTCOME="failed"      ;;
+            *)              STATUS="⚠️ Unknown";                       OUTCOME="failed"      ;;
           esac
           echo "OUTCOME=$OUTCOME" >> $GITHUB_ENV
 
-          ENV="${{ needs.resolve.outputs.environment }}"
-          BUCKET="${{ needs.resolve.outputs.bucket }}"
-          KEY="${{ needs.resolve.outputs.state_key }}"
-
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## Terraform CD — ${ENV}
-
+          ## Terraform CD — ${{ needs.resolve.outputs.environment }}
           | Field | Value |
           |---|---|
-          | **Status**       | ${STATUS} |
-          | **Environment**  | \`${ENV}\` |
-          | **Account ID**   | \`${{ inputs.account_id }}\` |
-          | **Directory**    | \`${{ inputs.working_directory }}\` |
-          | **State**        | \`s3://${BUCKET}/${KEY}\` |
-          | **Extra vars**   | \`${{ inputs.extra_vars }}\` |
-          | **Plan artifact**| \`${{ inputs.plan_artifact_name }}\` |
-          | **Triggered by** | @${{ github.actor }} |
-          | **Commit**       | \`${{ github.sha }}\` |
-          | **Run**          | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          | **Status**        | ${STATUS} |
+          | **Environment**   | \`${{ needs.resolve.outputs.environment }}\` |
+          | **Account ID**    | \`${{ inputs.account_id }}\` |
+          | **Directory**     | \`${{ inputs.working_directory }}\` |
+          | **State**         | \`s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}\` |
+          | **Extra vars**    | \`${{ inputs.extra_vars }}\` |
+          | **Plan artifact** | \`${{ inputs.plan_artifact_name }}\` |
+          | **Triggered by**  | @${{ github.actor }} |
+          | **Commit**        | \`${{ github.sha }}\` |
+          | **Run**           | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
           EOF
 
-      # ── 10. Set output + fail if needed ──────────────────────────────
+      # ── 10. Set output + fail if needed ───────────────────────────────
       - name: Set outcome output
         id: outcome
         if: always()
         run: |
           if [ "${{ inputs.plan_exitcode }}" = "0" ]; then
-            echo "value=skipped"         >> $GITHUB_OUTPUT
+            echo "value=skipped" >> $GITHUB_OUTPUT
           else
             echo "value=${OUTCOME:-failed}" >> $GITHUB_OUTPUT
           fi
