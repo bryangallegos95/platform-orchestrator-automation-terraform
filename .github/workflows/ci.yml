@@ -2,43 +2,21 @@
 #
 # Reusable CI workflow — triggered on Pull Request from product repos.
 #
+# TOOLS:
+#   - Terragrunt: wraps Terraform, backend injected via root terragrunt.hcl in son repo.
+#   - Infracost:  cost estimate posted as PR comment after plan.
+#
 # DYNAMIC RESOLUTION (nothing hardcoded per environment):
-#
-#   github.base_ref (target branch of PR) → environment
-#     dev     → runner: [self-hosted, terraform, dev]
-#               bucket: s3-aw-ue1-terraform-state-dev
-#     qa      → runner: [self-hosted, terraform, qa]
-#               bucket: s3-aw-ue1-terraform-state-qa
-#     preprod → runner: [self-hosted, terraform, preprod]
-#               bucket: s3-aw-ue1-terraform-state-preprod
-#     prod    → runner: [self-hosted, terraform, prod]
-#               bucket: s3-aw-ue1-terraform-state-prod
-#     dr      → runner: [self-hosted, terraform, dr]
-#               bucket: s3-aw-ue1-terraform-state-dr
-#
-#   state key → {ou_name}/{repo_name}/terraform.tfstate
-#     ou_name  : comes from Port via workflow input (= service name)
-#     repo_name: github.event.repository.name (automatic)
-#
-#   account_id: comes from Port via workflow input
-#
-# DYNAMIC VARS (extra_vars input):
-#   Son repos pass tgw_id, service, ambiente as -var flags so they
-#   never need to be hardcoded in terraform.tfvars.
-#   tgw_id  → read from org-level GitHub Variable TGW_HUB_ID in the son repo
-#   service → = ou_name (passed by Port)
-#   ambiente→ derived from branch name (automatic)
-#   Format: "key1=value1 key2=value2"
-#
-# AUTH MODEL:
-#   Pod pivot role injected via IRSA (no explicit step needed).
-#   One assume-role: pivot → target account (account_id dynamic, role name constant).
+#   branch → environment → runner label + state bucket
+#   ou_name + repo_name  → state key
+#   extra_vars           → -var flags (tgw_id, service, ambiente)
 #
 # JOBS:
-#   1. resolve  → derives environment, bucket, state key, runner label
-#   2. format   → terraform fmt -check
-#   3. lint     → tflint with AWS ruleset
-#   4. plan     → terraform validate + plan, posts output as PR comment
+#   ⓪ resolve  → derives environment, bucket, state key, runner label
+#   ① format   → terragrunt hclfmt --check
+#   ② lint     → tflint with AWS ruleset (after terragrunt init)
+#   ③ plan     → terragrunt validate + plan, posts output as PR comment
+#   ④ cost     → infracost breakdown, posts cost diff as PR comment
 
 name: "[reusable] Terraform CI"
 
@@ -46,7 +24,7 @@ on:
   workflow_call:
     inputs:
       working_directory:
-        description: "Path to Terraform files. E.g. environments/dev"
+        description: "Path to Terragrunt environment. E.g. environments/dev"
         required: true
         type: string
       account_id:
@@ -54,13 +32,12 @@ on:
         required: true
         type: string
       ou_name:
-        description: "OU / product name used as the root folder in the state bucket. Provided by Port. E.g. datosanalitica"
+        description: "OU / product name — root folder in state bucket. Provided by Port."
         required: true
         type: string
       extra_vars:
         description: |
-          Optional space-separated list of Terraform -var overrides.
-          These are injected at plan time and take precedence over terraform.tfvars.
+          Space-separated Terraform -var overrides injected at plan time.
           Format: "key1=value1 key2=value2"
           Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
         required: false
@@ -70,12 +47,15 @@ on:
         required: false
         type: string
         default: "1.10.5"
+      terragrunt_version:
+        required: false
+        type: string
+        default: "0.69.10"
       tflint_version:
         required: false
         type: string
         default: "v0.55.0"
       target_role_name:
-        description: "IAM role name in the target account. Identical across all accounts."
         required: false
         type: string
         default: "terraform-apply-role"
@@ -84,7 +64,6 @@ on:
         type: string
         default: "us-east-1"
       bucket_prefix:
-        description: "S3 bucket name prefix. Final name: {prefix}-{environment}"
         required: false
         type: string
         default: "s3-aw-ue1-terraform-state"
@@ -107,8 +86,6 @@ concurrency:
 jobs:
   # ─────────────────────────────────────────────
   #  RESOLVE
-  #  Derives all dynamic values from branch name.
-  #  All subsequent jobs consume these outputs.
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve environment"
@@ -124,8 +101,6 @@ jobs:
       - name: Derive environment from branch
         id: derive
         run: |
-          # On PR events, use the target branch (base_ref).
-          # On push events, use the branch being pushed to (ref_name).
           BRANCH="${{ github.base_ref || github.ref_name }}"
           REPO="${{ github.event.repository.name }}"
           OU="${{ inputs.ou_name }}"
@@ -139,31 +114,30 @@ jobs:
             dr)      ENV="dr"      ;;
             *)
               echo "::error::Branch '$BRANCH' does not map to a known environment."
-              echo "::error::Expected one of: dev, qa, preprod, prod, dr."
-              exit 1
-              ;;
+              exit 1 ;;
           esac
 
           BUCKET="${PREFIX}-${ENV}"
           STATE_KEY="${OU}/${REPO}/terraform.tfstate"
 
-          echo "environment=$ENV"        >> $GITHUB_OUTPUT
-          echo "bucket=$BUCKET"          >> $GITHUB_OUTPUT
-          echo "state_key=$STATE_KEY"    >> $GITHUB_OUTPUT
-          echo "runner_label=$ENV"       >> $GITHUB_OUTPUT
+          echo "environment=$ENV"     >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
+          echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
+          echo "runner_label=$ENV"    >> $GITHUB_OUTPUT
 
-          echo "### ⓪ Resolved values" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |"        >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|"               >> $GITHUB_STEP_SUMMARY
-          echo "| Branch      | \`$BRANCH\`     |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`$ENV\`         |" >> $GITHUB_STEP_SUMMARY
-          echo "| Bucket      | \`$BUCKET\`      |" >> $GITHUB_STEP_SUMMARY
-          echo "| State key   | \`$STATE_KEY\`   |" >> $GITHUB_STEP_SUMMARY
-          echo "| Account ID  | \`${{ inputs.account_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Extra vars  | \`${{ inputs.extra_vars }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "### ⓪ Resolved values"                            >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |"                                   >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|"                                          >> $GITHUB_STEP_SUMMARY
+          echo "| Branch      | \`$BRANCH\`    |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`$ENV\`        |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Bucket      | \`$BUCKET\`     |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| State key   | \`$STATE_KEY\`  |"                 >> $GITHUB_STEP_SUMMARY
+          echo "| Account ID  | \`${{ inputs.account_id }}\` |"   >> $GITHUB_STEP_SUMMARY
+          echo "| Extra vars  | \`${{ inputs.extra_vars }}\` |"   >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
   #  FORMAT
+  #  terragrunt hclfmt checks .hcl files.
   # ─────────────────────────────────────────────
   format:
     name: "① Format"
@@ -179,9 +153,16 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
-      - name: terraform fmt
+      - name: Setup Terragrunt
+        run: |
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+          terragrunt --version
+
+      - name: terragrunt hclfmt
         working-directory: ${{ inputs.working_directory }}
-        run: terraform fmt -check -recursive -diff
+        run: terragrunt hclfmt --check --diff
 
   # ─────────────────────────────────────────────
   #  LINT
@@ -194,6 +175,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Assume role in target account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: "tf-lint-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
+
+      - name: Terragrunt init (generates .tf files for TFLint)
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
@@ -208,7 +213,7 @@ jobs:
 
       - name: Run TFLint
         working-directory: ${{ inputs.working_directory }}
-        run: tflint --enable-plugin=aws --format=compact --recursive
+        run: tflint --enable-plugin=aws --format=compact
 
   # ─────────────────────────────────────────────
   #  VALIDATE + PLAN
@@ -232,7 +237,12 @@ jobs:
           terraform_version: ${{ inputs.terraform_version }}
           terraform_wrapper: false
 
-      # One assume-role: IRSA pivot (already in pod) → target account.
+      - name: Setup Terragrunt
+        run: |
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -240,40 +250,30 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
           role-session-name: "tf-ci-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
 
-      - name: Terraform init
+      - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ needs.resolve.outputs.bucket }}" \
-            -backend-config="key=${{ needs.resolve.outputs.state_key }}" \
-            -backend-config="region=${{ inputs.aws_region }}" \
-            -backend-config="encrypt=true" \
-            -backend-config="use_lockfile=true" \
-            -input=false \
-            -reconfigure
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
 
-      - name: Terraform validate
+      - name: Terragrunt validate
         working-directory: ${{ inputs.working_directory }}
-        run: terraform validate
+        run: terragrunt validate
 
-      - name: Terraform plan
+      - name: Terragrunt plan
         id: plan
         working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
-          # Build -var flags from the extra_vars input.
-          # Each space-separated key=value pair becomes a separate -var flag.
-          # These override anything in terraform.tfvars and inject:
-          #   tgw_id   → from org variable TGW_HUB_ID (never in tfvars)
-          #   service  → ou_name from Port (never hardcoded in son repo)
-          #   ambiente → branch-derived (never hardcoded in son repo)
+          # Build -var flags from extra_vars input.
           EXTRA_VAR_FLAGS=""
           for pair in ${{ inputs.extra_vars }}; do
             EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
           done
 
           set +e
-          eval terraform plan \
-            -var-file=terraform.tfvars \
+          eval terragrunt plan \
             $EXTRA_VAR_FLAGS \
             -out=tfplan \
             -input=false \
@@ -282,7 +282,7 @@ jobs:
           EXITCODE=${PIPESTATUS[0]}
           echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
           if [ "$EXITCODE" -eq "1" ]; then
-            echo "::error::Terraform plan failed."
+            echo "::error::Terragrunt plan failed."
             exit 1
           fi
           exit 0
@@ -368,3 +368,74 @@ jobs:
             ${{ inputs.working_directory }}/plan_output.txt
           retention-days: 5
           if-no-files-found: error
+
+  # ─────────────────────────────────────────────
+  #  COST ESTIMATE (Infracost)
+  #  Runs only on PRs when there are changes.
+  #  Posts a cost diff comment alongside the plan.
+  #  Requires: INFRACOST_API_KEY repo secret.
+  # ─────────────────────────────────────────────
+  cost:
+    name: "④ Cost estimate"
+    needs: [resolve, plan]
+    if: github.event_name == 'pull_request' && needs.plan.outputs.exitcode == '2'
+    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Setup Terragrunt
+        run: |
+          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
+            -o /usr/local/bin/terragrunt
+          chmod +x /usr/local/bin/terragrunt
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Assume role in target account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: "infracost-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
+
+      - name: Terragrunt init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.artifact_name }}
+          path: ${{ inputs.working_directory }}
+
+      - name: Convert plan to JSON
+        working-directory: ${{ inputs.working_directory }}
+        run: terragrunt show -json tfplan > tfplan.json
+
+      - name: Generate Infracost estimate
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          infracost breakdown \
+            --path tfplan.json \
+            --format json \
+            --out-file infracost.json
+
+      - name: Post cost estimate to PR
+        uses: infracost/actions/comment@v3
+        with:
+          path: ${{ inputs.working_directory }}/infracost.json
+          behavior: update
+          github-token: ${{ github.token }}
