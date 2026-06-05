@@ -80,7 +80,7 @@ on:
         value: ${{ jobs.resolve.outputs.environment }}
 
 concurrency:
-  group: "tf-ci-${{ github.event.pull_request.number }}-${{ github.base_ref }}"
+  group: "tf-ci-${{ github.event.pull_request.number || github.ref_name }}-${{ github.base_ref || inputs.ou_name }}"
   cancel-in-progress: true
 
 jobs:
