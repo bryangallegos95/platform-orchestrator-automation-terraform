@@ -78,6 +78,37 @@ on:
         required: false
         type: string
         default: "terraform-apply-role"
+        # ─── Deployment context (passthrough for promotion chain) ───
+      dev_account_id:
+        description: "DEV account ID — passed through for promotion chain."
+        required: false
+        type: string
+        default: ""
+      qa_account_id:
+        description: "QA account ID — passed through for promotion chain."
+        required: false
+        type: string
+        default: ""
+      preprod_account_id:
+        description: "PREPROD account ID — empty means preprod is skipped."
+        required: false
+        type: string
+        default: ""
+      prod_account_id:
+        description: "PROD account ID — passed through for promotion chain."
+        required: false
+        type: string
+        default: ""
+      dr_enabled:
+        description: "Whether DR (us-east-2) is enabled for prod."
+        required: false
+        type: boolean
+        default: false
+      feature_branch:
+        description: "Original feature branch (for traceability)."
+        required: false
+        type: string
+        default: ""
 
     outputs:
       plan_exitcode:
@@ -378,12 +409,13 @@ jobs:
           name: infracost-${{ inputs.environment }}-${{ github.sha }}
           path: ${{ inputs.working_directory }}/infracost.json
           retention-days: 5
-
+  
   # ─────────────────────────────────────────────
   #  ⑤ CREATE PR
-  #  Auto-creates a Pull Request with plan + cost
-  #  embedded in the PR body.
-  #  Only runs if create_pr=true and branches are provided.
+  #  Auto-creates a Pull Request with:
+  #    - Plan + cost in visible body
+  #    - Deployment context as hidden HTML metadata
+  #      (parsed by cd-on-merge.yml after merge)
   # ─────────────────────────────────────────────
   create-pr:
     name: "⑤ Create PR"
@@ -426,17 +458,23 @@ jobs:
           STATE_KEY="${{ needs.resolve.outputs.state_key }}"
           REGION="${{ needs.resolve.outputs.region }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          MONTHLY_COST="${{ needs.cost.outputs.monthly_cost || 'N/A' }}"
-          COST_DIFF="${{ needs.cost.outputs.cost_diff || 'N/A' }}"
+          MONTHLY_COST="${{ needs.cost.outputs.monthly_cost }}"
+          COST_DIFF="${{ needs.cost.outputs.cost_diff }}"
+
+          # Default cost values if cost job was skipped (no changes)
+          if [ -z "$MONTHLY_COST" ]; then MONTHLY_COST="N/A"; fi
+          if [ -z "$COST_DIFF" ]; then COST_DIFF="N/A"; fi
 
           # Determine change status
           if [ "$EXITCODE" = "0" ]; then
             STATUS_ICON="✅ No changes"
+            STATUS_MSG="> ℹ️ No infrastructure changes. Apply will be skipped in CD."
           else
             STATUS_ICON="⚠️ Changes detected"
+            STATUS_MSG="> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan."
           fi
 
-          # Read plan output (truncate if too large for PR body)
+          # Read plan output (truncate if too large)
           PLAN_OUTPUT="Plan output not available."
           if [ -f /tmp/plan-artifacts/plan_output.txt ]; then
             PLAN_RAW=$(cat /tmp/plan-artifacts/plan_output.txt)
@@ -455,9 +493,32 @@ jobs:
             PR_TITLE="🚀 [${ENV^^}] Deploy infrastructure — ${SHORT_SHA}"
           fi
 
-          # Build PR body
-          PR_BODY=$(cat << EOF
-          ## 🔍 Terraform Plan — \`${ENV}\` ${STATUS_ICON}
+          # Determine next environment for metadata
+          case "$ENV" in
+            dev)     NEXT_ENV="qa" ;;
+            qa)
+              if [ -n "${{ inputs.preprod_account_id }}" ]; then
+                NEXT_ENV="preprod"
+              else
+                NEXT_ENV="prod"
+              fi
+              ;;
+            preprod) NEXT_ENV="prod" ;;
+            prod)    NEXT_ENV="" ;;
+            *)       NEXT_ENV="" ;;
+          esac
+
+          # Determine approval teams for next transition
+          case "$ENV" in
+            dev)     NEXT_APPROVAL_TEAMS="Desarrollo" ;;
+            qa)      NEXT_APPROVAL_TEAMS="CloudOps,Seguridad" ;;
+            preprod) NEXT_APPROVAL_TEAMS="CloudOps,Infraestructura" ;;
+            prod)    NEXT_APPROVAL_TEAMS="" ;;
+            *)       NEXT_APPROVAL_TEAMS="" ;;
+          esac
+
+          # Build PR body with visible content + hidden metadata
+          PR_BODY="## 🔍 Terraform Plan — \`${ENV}\` ${STATUS_ICON}
 
           | Field | Value |
           |-------|-------|
@@ -473,11 +534,7 @@ jobs:
           | **Cost (diff)** | \`\$${COST_DIFF}/mo\` |
           | **Triggered by** | @${{ github.actor }} |
 
-          $(if [ "$EXITCODE" = "0" ]; then
-            echo "> ℹ️ No infrastructure changes. Apply will be skipped in CD."
-          else
-            echo "> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan."
-          fi)
+          ${STATUS_MSG}
 
           <details><summary>📋 Plan output (expand)</summary>
 
@@ -489,8 +546,30 @@ jobs:
 
           ---
           > 🤖 This PR was auto-created by the CI pipeline. Review the plan above and approve to deploy.
-          EOF
-          )
+
+          <!-- DEPLOYMENT_CONTEXT
+          environment: ${ENV}
+          account_id: ${{ inputs.account_id }}
+          ou_name: ${{ inputs.ou_name }}
+          working_directory: ${{ inputs.working_directory }}
+          extra_vars: ${{ inputs.extra_vars }}
+          plan_artifact_name: ${{ needs.plan.outputs.artifact_name }}
+          plan_exitcode: ${EXITCODE}
+          next_environment: ${NEXT_ENV}
+          approval_teams: ${NEXT_APPROVAL_TEAMS}
+          dev_account_id: ${{ inputs.dev_account_id }}
+          qa_account_id: ${{ inputs.qa_account_id }}
+          preprod_account_id: ${{ inputs.preprod_account_id }}
+          prod_account_id: ${{ inputs.prod_account_id }}
+          dr_enabled: ${{ inputs.dr_enabled }}
+          feature_branch: ${{ inputs.feature_branch }}
+          source_branch: ${SOURCE}
+          target_branch: ${TARGET}
+          region: ${REGION}
+          commit_sha: ${{ github.sha }}
+          monthly_cost: ${MONTHLY_COST}
+          cost_diff: ${COST_DIFF}
+          -->"
 
           # Check if PR already exists
           EXISTING_PR=$(gh pr list \
@@ -522,7 +601,7 @@ jobs:
             echo "Created new PR #${PR_NUMBER}"
           fi
 
-          # Add production label if prod
+          # Add production label if prod/dr
           if [ "$ENV" = "prod" ] || [ "$ENV" = "dr" ]; then
             gh pr edit "$PR_NUMBER" --add-label "production" 2>/dev/null || true
           fi
@@ -541,4 +620,5 @@ jobs:
           | Source | \`${{ inputs.pr_source_branch }}\` |
           | Target | \`${{ inputs.pr_target_branch }}\` |
           | Environment | \`${{ inputs.environment }}\` |
+          | Context metadata | ✅ Embedded |
           EOF
