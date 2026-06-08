@@ -3,7 +3,17 @@
 # All inputs for the Spoke VPC module.
 # CIDRs come from Port.io via the caller workflow (terraform.tfvars).
 # Mandatory tags are enforced at the variable level — no default values.
+# ── Region ───────────────────────────────────────────────────────────────────
+variable "aws_region" {
+  description = "AWS region where resources will be created. Used by the provider block generated in root terragrunt.hcl."
+  type        = string
+  default     = "us-east-1"
 
+  validation {
+    condition     = contains(["us-east-1", "us-east-2"], var.aws_region)
+    error_message = "aws_region must be us-east-1 (primary) or us-east-2 (DR). No other regions are enabled."
+  }
+}
 # ── Identity ──────────────────────────────────────────────────────────────────
 variable "service" {
   description = "Short service / product name used in resource naming. E.g. 'payments', 'devops', 'bff'"
