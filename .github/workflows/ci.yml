@@ -2,35 +2,35 @@
 #
 # Reusable CI workflow — called by product (son) repos.
 #
-# TOOLS:
-#   - Terragrunt: wraps Terraform, backend injected via root terragrunt.hcl in son repo.
-#   - TFLint:     linting with AWS ruleset.
-#   - Infracost:  cost estimate posted as PR comment after plan.
-#
-# DYNAMIC RESOLUTION (nothing hardcoded per environment):
-#   branch → environment → runner label + state bucket
-#   ou_name + repo_name  → state key
-#   extra_vars           → -var flags (tgw_id, service, ambiente)
+# PREREQUISITES:
+#   Runner image v2.0.0+ with pre-installed:
+#   Terraform, Terragrunt, TFLint (+ AWS plugin), Infracost, gh CLI
 #
 # JOBS:
-#   ⓪ resolve    → derives environment, bucket, state key, runner label
+#   ⓪ resolve    → derives bucket, state key, region from environment input
 #   ① format     → terragrunt hclfmt --check
-#   ② lint       → tflint with AWS ruleset (after terragrunt init)
+#   ② lint       → tflint with AWS ruleset (plugin pre-installed in image)
 #   ③ plan       → terragrunt validate + plan, uploads artifact
-#   ④ cost       → infracost breakdown
-#   ⑤ create-pr  → auto-creates PR with plan + cost as comments
+#   ④ cost       → infracost breakdown (only if changes detected)
+#   ⑤ create-pr  → auto-creates PR with plan + cost as body
 #
-# BRANCH MAPPING:
-#   dev      → dev environment
-#   testing  → qa environment
-#   preprod  → preprod environment
-#   master   → prod environment
+# ENVIRONMENT → RUNNER TAG → REGION MAPPING:
+#   dev      → [self-hosted, terraform, dev]      → us-east-1
+#   qa       → [self-hosted, terraform, qa]       → us-east-1
+#   preprod  → [self-hosted, terraform, preprod]  → us-east-1
+#   prod     → [self-hosted, terraform, prod]     → us-east-1
+#   dr       → [self-hosted, terraform, dr]       → us-east-2
 
 name: "[reusable] Terraform CI"
 
 on:
   workflow_call:
     inputs:
+      # ─── Required inputs ───────────────────────────────────────
+      environment:
+        description: "Target environment: dev, qa, preprod, prod, dr"
+        required: true
+        type: string
       working_directory:
         description: "Path to Terragrunt environment. E.g. environments/dev"
         required: true
@@ -43,6 +43,8 @@ on:
         description: "OU / product name — root folder in state bucket."
         required: true
         type: string
+
+      # ─── Optional inputs ───────────────────────────────────────
       extra_vars:
         description: |
           Space-separated Terraform -var overrides injected at plan time.
@@ -71,30 +73,11 @@ on:
         required: false
         type: string
         default: ""
-      terraform_version:
-        required: false
-        type: string
-        default: "1.10.5"
-      terragrunt_version:
-        required: false
-        type: string
-        default: "0.69.10"
-      tflint_version:
-        required: false
-        type: string
-        default: "v0.55.0"
       target_role_name:
+        description: "IAM role name to assume in target account."
         required: false
         type: string
         default: "terraform-apply-role"
-      aws_region:
-        required: false
-        type: string
-        default: "us-east-1"
-      bucket_prefix:
-        required: false
-        type: string
-        default: "s3-aw-ue1-terraform-state"
 
     outputs:
       plan_exitcode:
@@ -114,60 +97,69 @@ on:
         value: ${{ jobs.create-pr.outputs.pr_url }}
 
 concurrency:
-  group: "tf-ci-${{ github.event.pull_request.number || github.ref_name }}-${{ inputs.ou_name }}"
+  group: "tf-ci-${{ inputs.environment }}-${{ inputs.ou_name }}-${{ github.event.pull_request.number || github.ref_name }}"
   cancel-in-progress: true
 
 jobs:
   # ─────────────────────────────────────────────
   #  ⓪ RESOLVE
+  #  Derives: region, bucket, state_key
+  #  Validates: environment input is valid
   # ─────────────────────────────────────────────
   resolve:
-    name: "⓪ Resolve environment"
-    runs-on: [self-hosted, terraform]
+    name: "⓪ Resolve"
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
-      environment:  ${{ steps.derive.outputs.environment }}
-      bucket:       ${{ steps.derive.outputs.bucket }}
-      state_key:    ${{ steps.derive.outputs.state_key }}
-      runner_label: ${{ steps.derive.outputs.runner_label }}
+      environment: ${{ steps.derive.outputs.environment }}
+      region:      ${{ steps.derive.outputs.region }}
+      bucket:      ${{ steps.derive.outputs.bucket }}
+      state_key:   ${{ steps.derive.outputs.state_key }}
 
     steps:
-      - name: Derive environment from branch
+      - name: Derive infrastructure context
         id: derive
         run: |
-          BRANCH="${{ inputs.pr_target_branch || github.base_ref || github.ref_name }}"
+          ENV="${{ inputs.environment }}"
           REPO="${{ github.event.repository.name }}"
           OU="${{ inputs.ou_name }}"
-          PREFIX="${{ inputs.bucket_prefix }}"
 
-          case "$BRANCH" in
-            dev)      ENV="dev";     ;;
-            testing)  ENV="qa";      ;;
-            preprod)  ENV="preprod"; ;;
-            master)   ENV="prod";    ;;
+          # Region mapping (hardcoded — only us-east-1 and us-east-2 are enabled)
+          case "$ENV" in
+            dev|qa|preprod|prod)
+              REGION="us-east-1"
+              BUCKET="s3-aw-ue1-terraform-state-${ENV}"
+              ;;
+            dr)
+              REGION="us-east-2"
+              BUCKET="s3-aw-ue2-terraform-state-dr"
+              ;;
             *)
-              echo "::error::Branch '$BRANCH' does not map to a known environment."
-              echo "::error::Valid branches: dev, testing, preprod, master"
-              exit 1 ;;
+              echo "::error::Invalid environment: '$ENV'. Valid: dev, qa, preprod, prod, dr"
+              exit 1
+              ;;
           esac
 
-          BUCKET="${PREFIX}-${ENV}"
           STATE_KEY="${OU}/${REPO}/terraform.tfstate"
 
-          echo "environment=$ENV"     >> $GITHUB_OUTPUT
-          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
+          echo "environment=$ENV"   >> $GITHUB_OUTPUT
+          echo "region=$REGION"     >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"     >> $GITHUB_OUTPUT
           echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
-          echo "runner_label=$ENV"    >> $GITHUB_OUTPUT
 
-          echo "### ⓪ Resolved values"                            >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |"                                   >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|"                                          >> $GITHUB_STEP_SUMMARY
-          echo "| Branch      | \`$BRANCH\`    |"                 >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`$ENV\`        |"                 >> $GITHUB_STEP_SUMMARY
-          echo "| Bucket      | \`$BUCKET\`     |"                 >> $GITHUB_STEP_SUMMARY
-          echo "| State key   | \`$STATE_KEY\`  |"                 >> $GITHUB_STEP_SUMMARY
-          echo "| Account ID  | \`${{ inputs.account_id }}\` |"   >> $GITHUB_STEP_SUMMARY
-          echo "| Extra vars  | \`${{ inputs.extra_vars }}\` |"   >> $GITHUB_STEP_SUMMARY
+          # Job summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ⓪ Resolved Context
+          | Key | Value |
+          |-----|-------|
+          | Environment | \`${ENV}\` |
+          | Region | \`${REGION}\` |
+          | Bucket | \`${BUCKET}\` |
+          | State key | \`${STATE_KEY}\` |
+          | Account ID | \`${{ inputs.account_id }}\` |
+          | Working dir | \`${{ inputs.working_directory }}\` |
+          | Extra vars | \`${{ inputs.extra_vars }}\` |
+          EOF
 
   # ─────────────────────────────────────────────
   #  ① FORMAT
@@ -175,7 +167,7 @@ jobs:
   format:
     name: "① Format"
     needs: resolve
-    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     steps:
       - name: Checkout
@@ -183,19 +175,7 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ inputs.terraform_version }}
-
-      - name: Setup Terragrunt
-        run: |
-          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
-            -o /usr/local/bin/terragrunt
-          chmod +x /usr/local/bin/terragrunt
-          terragrunt --version
-
-      - name: terragrunt hclfmt
+      - name: Terragrunt hclfmt
         working-directory: ${{ inputs.working_directory }}
         run: terragrunt hclfmt --check --diff
 
@@ -205,7 +185,7 @@ jobs:
   lint:
     name: "② Lint"
     needs: resolve
-    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     steps:
       - name: Checkout
@@ -213,52 +193,30 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ inputs.terraform_version }}
-
-      - name: Setup Terragrunt
-        run: |
-          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
-            -o /usr/local/bin/terragrunt
-          chmod +x /usr/local/bin/terragrunt
-
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
-          aws-region: ${{ inputs.aws_region }}
-          role-session-name: "tf-lint-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
+          aws-region: ${{ needs.resolve.outputs.region }}
+          role-session-name: "tf-lint-${{ inputs.environment }}-${{ github.run_id }}"
 
-      - name: Terragrunt init (generates .tf files for TFLint)
+      - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
 
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-        with:
-          tflint_version: ${{ inputs.tflint_version }}
-
-      - name: Init TFLint
-        working-directory: ${{ inputs.working_directory }}
-        run: tflint --init
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
       - name: Run TFLint
         working-directory: ${{ inputs.working_directory }}
-        run: tflint --enable-plugin=aws --format=compact
+        run: tflint --format=compact
 
   # ─────────────────────────────────────────────
   #  ③ VALIDATE + PLAN
   # ─────────────────────────────────────────────
   plan:
-    name: "③ Validate + Plan"
+    name: "③ Plan"
     needs: [resolve, format, lint]
-    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
       exitcode:      ${{ steps.plan.outputs.exitcode }}
@@ -270,24 +228,12 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ inputs.terraform_version }}
-          terraform_wrapper: false
-
-      - name: Setup Terragrunt
-        run: |
-          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
-            -o /usr/local/bin/terragrunt
-          chmod +x /usr/local/bin/terragrunt
-
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
-          aws-region: ${{ inputs.aws_region }}
-          role-session-name: "tf-ci-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
+          aws-region: ${{ needs.resolve.outputs.region }}
+          role-session-name: "tf-plan-${{ inputs.environment }}-${{ github.run_id }}"
 
       - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
@@ -305,7 +251,7 @@ jobs:
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
-          # Build -var flags from extra_vars input.
+          # Build -var flags from extra_vars input
           EXTRA_VAR_FLAGS=""
           if [ -n "${{ inputs.extra_vars }}" ]; then
             for pair in ${{ inputs.extra_vars }}; do
@@ -327,13 +273,23 @@ jobs:
             echo "::error::Terragrunt plan failed."
             exit 1
           fi
+
+          # Summary
+          if [ "$EXITCODE" -eq "0" ]; then
+            echo "### ③ Plan: ✅ No changes" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ③ Plan: ⚠️ Changes detected" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -20 plan_output.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
           exit 0
 
       - name: Build artifact name
         id: artifact_name
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          ENV="${{ needs.resolve.outputs.environment }}"
+          ENV="${{ inputs.environment }}"
           echo "value=tfplan-${ENV}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Upload plan artifact
@@ -347,13 +303,15 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────
-  #  ④ COST ESTIMATE (Infracost)
+  #  ④ COST ESTIMATE
+  #  Uses Infracost CLI pre-installed in runner image.
+  #  INFRACOST_API_KEY injected via pod environment.
   # ─────────────────────────────────────────────
   cost:
-    name: "④ Cost estimate"
+    name: "④ Cost"
     needs: [resolve, plan]
     if: needs.plan.outputs.exitcode == '2'
-    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
       monthly_cost: ${{ steps.parse.outputs.monthly_cost }}
@@ -365,29 +323,12 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ inputs.terraform_version }}
-          terraform_wrapper: false
-
-      - name: Setup Terragrunt
-        run: |
-          curl -sL "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64" \
-            -o /usr/local/bin/terragrunt
-          chmod +x /usr/local/bin/terragrunt
-
-      - name: Setup Infracost
-        uses: infracost/actions/setup@v3
-        with:
-          api-key: ${{ secrets.INFRACOST_API_KEY }}
-
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
-          aws-region: ${{ inputs.aws_region }}
-          role-session-name: "infracost-${{ needs.resolve.outputs.environment }}-${{ github.run_id }}"
+          aws-region: ${{ needs.resolve.outputs.region }}
+          role-session-name: "infracost-${{ inputs.environment }}-${{ github.run_id }}"
 
       - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
@@ -422,27 +363,42 @@ jobs:
           echo "monthly_cost=$MONTHLY" >> $GITHUB_OUTPUT
           echo "cost_diff=$DIFF" >> $GITHUB_OUTPUT
 
+          # Summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ④ Cost Estimate
+          | Metric | Value |
+          |--------|-------|
+          | Monthly cost | \`\$${MONTHLY}/mo\` |
+          | Cost diff | \`\$${DIFF}/mo\` |
+          EOF
+
       - name: Upload cost artifact
         uses: actions/upload-artifact@v4
         with:
-          name: infracost-${{ needs.resolve.outputs.environment }}-${{ github.sha }}
+          name: infracost-${{ inputs.environment }}-${{ github.sha }}
           path: ${{ inputs.working_directory }}/infracost.json
           retention-days: 5
 
   # ─────────────────────────────────────────────
   #  ⑤ CREATE PR
   #  Auto-creates a Pull Request with plan + cost
-  #  as comments. Only runs if create_pr=true.
+  #  embedded in the PR body.
+  #  Only runs if create_pr=true and branches are provided.
   # ─────────────────────────────────────────────
   create-pr:
     name: "⑤ Create PR"
     needs: [resolve, plan, cost]
-    if: always() && inputs.create_pr && inputs.pr_source_branch != '' && inputs.pr_target_branch != '' && needs.plan.result == 'success'
-    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+    if: |
+      always() &&
+      inputs.create_pr &&
+      inputs.pr_source_branch != '' &&
+      inputs.pr_target_branch != '' &&
+      needs.plan.result == 'success'
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
-      pr_number: ${{ steps.create_pr.outputs.pr_number }}
-      pr_url:    ${{ steps.create_pr.outputs.pr_url }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      pr_url:    ${{ steps.pr.outputs.pr_url }}
 
     steps:
       - name: Checkout
@@ -458,125 +414,131 @@ jobs:
           path: /tmp/plan-artifacts
 
       - name: Create or update Pull Request
-        id: create_pr
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs = require('fs');
-            const source = '${{ inputs.pr_source_branch }}';
-            const target = '${{ inputs.pr_target_branch }}';
-            const env = '${{ needs.resolve.outputs.environment }}';
-            const exitcode = '${{ needs.plan.outputs.exitcode }}';
-            const noChanges = exitcode === '0';
-            const bucket = '${{ needs.resolve.outputs.bucket }}';
-            const stateKey = '${{ needs.resolve.outputs.state_key }}';
-            const sha = '${{ github.sha }}'.slice(0, 7);
-            const monthlyCost = '${{ needs.cost.outputs.monthly_cost || 'N/A' }}';
-            const costDiff = '${{ needs.cost.outputs.cost_diff || 'N/A' }}';
-
-            // Read plan output
-            let planText = 'Plan output not available.';
-            try {
-              const raw = fs.readFileSync('/tmp/plan-artifacts/plan_output.txt', 'utf8');
-              const MAX = 60000;
-              planText = raw.length > MAX
-                ? raw.slice(0, MAX) + '\n\n⚠️ Output truncated — see Actions for full log.'
-                : raw;
-            } catch (e) {
-              console.log('Could not read plan output:', e.message);
-            }
-
-            // Build PR title
-            const prTitle = '${{ inputs.pr_title }}' || `🚀 [${env.toUpperCase()}] Deploy infrastructure — ${sha}`;
-
-            // Build PR body
-            const body = [
-              `## 🔍 Terraform Plan — \`${env}\` ${noChanges ? '✅ No changes' : '⚠️ Changes detected'}`,
-              '',
-              '| Field | Value |',
-              '|-------|-------|',
-              `| **Environment** | \`${env}\` |`,
-              `| **Account ID** | \`${{ inputs.account_id }}\` |`,
-              `| **Directory** | \`${{ inputs.working_directory }}\` |`,
-              `| **State bucket** | \`${bucket}\` |`,
-              `| **State key** | \`${stateKey}\` |`,
-              `| **Extra vars** | \`${{ inputs.extra_vars }}\` |`,
-              `| **Commit** | \`${sha}\` |`,
-              `| **Cost (monthly)** | \`$${monthlyCost}/mo\` |`,
-              `| **Cost (diff)** | \`$${costDiff}/mo\` |`,
-              `| **Triggered by** | @${{ github.actor }} |`,
-              '',
-              noChanges
-                ? '> ℹ️ No infrastructure changes. Apply will be skipped in CD.'
-                : '> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan.',
-              '',
-              '<details><summary>📋 Plan output (expand)</summary>',
-              '',
-              '```hcl',
-              planText,
-              '```',
-              '</details>',
-              '',
-              '---',
-              '> 🤖 This PR was auto-created by the CI pipeline. Review the plan above and approve to deploy.',
-            ].join('\n');
-
-            // Check if PR already exists
-            const { data: existingPRs } = await github.rest.pulls.list({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              head: `${context.repo.owner}:${source}`,
-              base: target,
-              state: 'open',
-            });
-
-            let pr;
-            if (existingPRs.length > 0) {
-              // Update existing PR
-              pr = existingPRs[0];
-              await github.rest.pulls.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: pr.number,
-                title: prTitle,
-                body: body,
-              });
-              console.log(`Updated existing PR #${pr.number}`);
-            } else {
-              // Create new PR
-              const { data: newPR } = await github.rest.pulls.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: prTitle,
-                body: body,
-                head: source,
-                base: target,
-              });
-              pr = newPR;
-              console.log(`Created new PR #${pr.number}`);
-            }
-
-            // Add labels
-            const labels = [`environment/${env}`, 'terraform', 'needs-review'];
-            if (env === 'prod') labels.push('production');
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: pr.number,
-              labels: labels,
-            });
-
-            // Set outputs
-            core.setOutput('pr_number', pr.number.toString());
-            core.setOutput('pr_url', pr.html_url);
-
-      - name: Post CI summary
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "### ⑤ Pull Request" >> $GITHUB_STEP_SUMMARY
-          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
-          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| PR | [#${{ steps.create_pr.outputs.pr_number }}](${{ steps.create_pr.outputs.pr_url }}) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Source | \`${{ inputs.pr_source_branch }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Target | \`${{ inputs.pr_target_branch }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | \`${{ needs.resolve.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
+          SOURCE="${{ inputs.pr_source_branch }}"
+          TARGET="${{ inputs.pr_target_branch }}"
+          ENV="${{ inputs.environment }}"
+          EXITCODE="${{ needs.plan.outputs.exitcode }}"
+          BUCKET="${{ needs.resolve.outputs.bucket }}"
+          STATE_KEY="${{ needs.resolve.outputs.state_key }}"
+          REGION="${{ needs.resolve.outputs.region }}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          MONTHLY_COST="${{ needs.cost.outputs.monthly_cost || 'N/A' }}"
+          COST_DIFF="${{ needs.cost.outputs.cost_diff || 'N/A' }}"
+
+          # Determine change status
+          if [ "$EXITCODE" = "0" ]; then
+            STATUS_ICON="✅ No changes"
+          else
+            STATUS_ICON="⚠️ Changes detected"
+          fi
+
+          # Read plan output (truncate if too large for PR body)
+          PLAN_OUTPUT="Plan output not available."
+          if [ -f /tmp/plan-artifacts/plan_output.txt ]; then
+            PLAN_RAW=$(cat /tmp/plan-artifacts/plan_output.txt)
+            if [ ${#PLAN_RAW} -gt 60000 ]; then
+              PLAN_OUTPUT="${PLAN_RAW:0:60000}
+
+          ⚠️ Output truncated — see Actions for full log."
+            else
+              PLAN_OUTPUT="$PLAN_RAW"
+            fi
+          fi
+
+          # Build PR title
+          PR_TITLE="${{ inputs.pr_title }}"
+          if [ -z "$PR_TITLE" ]; then
+            PR_TITLE="🚀 [${ENV^^}] Deploy infrastructure — ${SHORT_SHA}"
+          fi
+
+          # Build PR body
+          PR_BODY=$(cat << EOF
+          ## 🔍 Terraform Plan — \`${ENV}\` ${STATUS_ICON}
+
+          | Field | Value |
+          |-------|-------|
+          | **Environment** | \`${ENV}\` |
+          | **Region** | \`${REGION}\` |
+          | **Account ID** | \`${{ inputs.account_id }}\` |
+          | **Directory** | \`${{ inputs.working_directory }}\` |
+          | **State bucket** | \`${BUCKET}\` |
+          | **State key** | \`${STATE_KEY}\` |
+          | **Extra vars** | \`${{ inputs.extra_vars }}\` |
+          | **Commit** | \`${SHORT_SHA}\` |
+          | **Cost (monthly)** | \`\$${MONTHLY_COST}/mo\` |
+          | **Cost (diff)** | \`\$${COST_DIFF}/mo\` |
+          | **Triggered by** | @${{ github.actor }} |
+
+          $(if [ "$EXITCODE" = "0" ]; then
+            echo "> ℹ️ No infrastructure changes. Apply will be skipped in CD."
+          else
+            echo "> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan."
+          fi)
+
+          <details><summary>📋 Plan output (expand)</summary>
+
+          \`\`\`hcl
+          ${PLAN_OUTPUT}
+          \`\`\`
+
+          </details>
+
+          ---
+          > 🤖 This PR was auto-created by the CI pipeline. Review the plan above and approve to deploy.
+          EOF
+          )
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list \
+            --head "$SOURCE" \
+            --base "$TARGET" \
+            --state open \
+            --json number,url \
+            --jq '.[0]' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            # Update existing PR
+            PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.number')
+            PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
+            gh pr edit "$PR_NUMBER" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY"
+            echo "Updated existing PR #${PR_NUMBER}"
+          else
+            # Create new PR
+            PR_URL=$(gh pr create \
+              --head "$SOURCE" \
+              --base "$TARGET" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY" \
+              --label "environment/${ENV}" \
+              --label "terraform" \
+              --label "needs-review")
+            PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
+            echo "Created new PR #${PR_NUMBER}"
+          fi
+
+          # Add production label if prod
+          if [ "$ENV" = "prod" ] || [ "$ENV" = "dr" ]; then
+            gh pr edit "$PR_NUMBER" --add-label "production" 2>/dev/null || true
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+
+      - name: PR Summary
+        if: steps.pr.outputs.pr_number != ''
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ⑤ Pull Request
+          | Field | Value |
+          |-------|-------|
+          | PR | [#${{ steps.pr.outputs.pr_number }}](${{ steps.pr.outputs.pr_url }}) |
+          | Source | \`${{ inputs.pr_source_branch }}\` |
+          | Target | \`${{ inputs.pr_target_branch }}\` |
+          | Environment | \`${{ inputs.environment }}\` |
+          EOF
