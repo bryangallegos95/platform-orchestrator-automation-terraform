@@ -85,7 +85,7 @@ on:
         type: string
         default: ""
       approval_teams:
-        description: "Comma-separated GitHub teams for issue assignment. E.g. 'Dev-team,CloudOps-team'"
+        description: "Comma-separated GitHub teams for issue assignment. E.g. 'Desarrollo,CloudOps'"
         required: false
         type: string
         default: ""
@@ -395,7 +395,7 @@ jobs:
   #  ② PROMOTION ISSUE
   #  Creates a GitHub Issue for team validation.
   #  Contains /approve and /reject commands.
-  #  Embeds promotion metadata as hidden HTML comment
+  #  Embeds PROMOTION_METADATA as hidden HTML comment
   #  for the promotion-listener workflow to parse.
   # ─────────────────────────────────────────────
   promotion-issue:
@@ -424,20 +424,20 @@ jobs:
           APPROVAL_TEAMS="${{ inputs.approval_teams }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-          # Determine promotion label
+          # Promotion label
           PROMOTION_LABEL="promotion/${ENV}-to-${NEXT_ENV}"
 
-          # Build assignees from approval_teams (comma-separated team slugs)
+          # Build assignee mentions
           ASSIGNEE_MENTIONS=""
           if [ -n "$APPROVAL_TEAMS" ]; then
             IFS=',' read -ra TEAMS <<< "$APPROVAL_TEAMS"
             for team in "${TEAMS[@]}"; do
-              team=$(echo "$team" | xargs) # trim whitespace
+              team=$(echo "$team" | xargs)
               ASSIGNEE_MENTIONS="${ASSIGNEE_MENTIONS}@${{ github.repository_owner }}/${team} "
             done
           fi
 
-          # Determine environment emoji
+          # Environment emoji
           case "$ENV" in
             dev)     ENV_EMOJI="🔧" ;;
             qa)      ENV_EMOJI="🧪" ;;
@@ -449,24 +449,23 @@ jobs:
           # Issue title
           ISSUE_TITLE="${ENV_EMOJI} [${ENV^^}] Validate: ${{ github.event.repository.name }} — ${SHORT_SHA}"
 
-          # Issue body with promotion metadata
-          ISSUE_BODY=$(cat << 'ISSUE_EOF'
-          ## 📋 Deployment Summary
+          # Issue body
+          ISSUE_BODY="## 📋 Deployment Summary
 
           | Field | Value |
           |-------|-------|
-          | **Source Environment** | `ENV_PLACEHOLDER` |
-          | **Target Environment** | `NEXT_ENV_PLACEHOLDER` |
-          | **Region** | `REGION_PLACEHOLDER` |
-          | **Account ID** | `ACCOUNT_PLACEHOLDER` |
-          | **Repository** | `REPO_PLACEHOLDER` |
-          | **Commit** | `SHA_PLACEHOLDER` |
-          | **Apply Run** | [View workflow](RUN_URL_PLACEHOLDER) |
-          | **Triggered by** | @ACTOR_PLACEHOLDER |
+          | **Source Environment** | \`${ENV}\` |
+          | **Target Environment** | \`${NEXT_ENV}\` |
+          | **Region** | \`${{ needs.resolve.outputs.region }}\` |
+          | **Account ID** | \`${{ inputs.account_id }}\` |
+          | **Repository** | \`${REPO}\` |
+          | **Commit** | \`${SHORT_SHA}\` |
+          | **Apply Run** | [View workflow](${RUN_URL}) |
+          | **Triggered by** | @${{ github.actor }} |
 
           ## 🔗 Links
-          - [CI/CD Run](RUN_URL_PLACEHOLDER)
-          - [Repository](https://github.com/REPO_PLACEHOLDER)
+          - [CI/CD Run](${RUN_URL})
+          - [Repository](https://github.com/${REPO})
 
           ## ✅ Validation Checklist
           - [ ] Infrastructure accessible and functional
@@ -477,61 +476,37 @@ jobs:
 
           ## 🎯 Action Required
 
-          > **Assigned teams**: ASSIGNEE_MENTIONS_PLACEHOLDER
-          > **Next environment**: `NEXT_ENV_PLACEHOLDER`
+          > **Assigned teams**: ${ASSIGNEE_MENTIONS}
+          > **Next environment**: \`${NEXT_ENV}\`
 
           | Command | Effect |
           |---------|--------|
-          | `/approve` | ✅ Close issue + promote to `NEXT_ENV_PLACEHOLDER` |
-          | `/reject reason: <description>` | ❌ Close issue + stop promotion |
+          | \`/approve\` | ✅ Close issue + promote to \`${NEXT_ENV}\` |
+          | \`/reject reason: <description>\` | ❌ Close issue + stop promotion |
 
           ⚠️ **Only members of the assigned teams can approve or reject.**
 
           ---
 
           <!-- PROMOTION_METADATA
-          source_env: ENV_PLACEHOLDER
-          target_env: NEXT_ENV_PLACEHOLDER
-          approval_teams: APPROVAL_TEAMS_PLACEHOLDER
-          account_id: ACCOUNT_PLACEHOLDER
-          dev_account_id: DEV_ACCOUNT_PLACEHOLDER
-          qa_account_id: QA_ACCOUNT_PLACEHOLDER
-          preprod_account_id: PREPROD_ACCOUNT_PLACEHOLDER
-          prod_account_id: PROD_ACCOUNT_PLACEHOLDER
-          dr_enabled: DR_ENABLED_PLACEHOLDER
-          ou_name: OU_PLACEHOLDER
-          feature_branch: FEATURE_BRANCH_PLACEHOLDER
-          commit_sha: FULL_SHA_PLACEHOLDER
-          working_directory: WORKDIR_PLACEHOLDER
-          repository: REPO_PLACEHOLDER
-          run_id: RUN_ID_PLACEHOLDER
-          -->
-          ISSUE_EOF
-          )
+          source_env: ${ENV}
+          target_env: ${NEXT_ENV}
+          approval_teams: ${APPROVAL_TEAMS}
+          account_id: ${{ inputs.account_id }}
+          dev_account_id: ${{ inputs.dev_account_id }}
+          qa_account_id: ${{ inputs.qa_account_id }}
+          preprod_account_id: ${{ inputs.preprod_account_id }}
+          prod_account_id: ${{ inputs.prod_account_id }}
+          dr_enabled: ${{ inputs.dr_enabled }}
+          ou_name: ${{ inputs.ou_name }}
+          feature_branch: ${{ inputs.feature_branch }}
+          commit_sha: ${{ github.sha }}
+          working_directory: ${{ inputs.working_directory }}
+          repository: ${REPO}
+          run_id: ${{ github.run_id }}
+          -->"
 
-          # Replace placeholders
-          ISSUE_BODY="${ISSUE_BODY//ENV_PLACEHOLDER/$ENV}"
-          ISSUE_BODY="${ISSUE_BODY//NEXT_ENV_PLACEHOLDER/$NEXT_ENV}"
-          ISSUE_BODY="${ISSUE_BODY//REGION_PLACEHOLDER/${{ needs.resolve.outputs.region }}}"
-          ISSUE_BODY="${ISSUE_BODY//ACCOUNT_PLACEHOLDER/${{ inputs.account_id }}}"
-          ISSUE_BODY="${ISSUE_BODY//REPO_PLACEHOLDER/$REPO}"
-          ISSUE_BODY="${ISSUE_BODY//SHA_PLACEHOLDER/$SHORT_SHA}"
-          ISSUE_BODY="${ISSUE_BODY//FULL_SHA_PLACEHOLDER/${{ github.sha }}}"
-          ISSUE_BODY="${ISSUE_BODY//RUN_URL_PLACEHOLDER/$RUN_URL}"
-          ISSUE_BODY="${ISSUE_BODY//ACTOR_PLACEHOLDER/${{ github.actor }}}"
-          ISSUE_BODY="${ISSUE_BODY//ASSIGNEE_MENTIONS_PLACEHOLDER/$ASSIGNEE_MENTIONS}"
-          ISSUE_BODY="${ISSUE_BODY//APPROVAL_TEAMS_PLACEHOLDER/$APPROVAL_TEAMS}"
-          ISSUE_BODY="${ISSUE_BODY//DEV_ACCOUNT_PLACEHOLDER/${{ inputs.dev_account_id }}}"
-          ISSUE_BODY="${ISSUE_BODY//QA_ACCOUNT_PLACEHOLDER/${{ inputs.qa_account_id }}}"
-          ISSUE_BODY="${ISSUE_BODY//PREPROD_ACCOUNT_PLACEHOLDER/${{ inputs.preprod_account_id }}}"
-          ISSUE_BODY="${ISSUE_BODY//PROD_ACCOUNT_PLACEHOLDER/${{ inputs.prod_account_id }}}"
-          ISSUE_BODY="${ISSUE_BODY//DR_ENABLED_PLACEHOLDER/${{ inputs.dr_enabled }}}"
-          ISSUE_BODY="${ISSUE_BODY//OU_PLACEHOLDER/${{ inputs.ou_name }}}"
-          ISSUE_BODY="${ISSUE_BODY//FEATURE_BRANCH_PLACEHOLDER/${{ inputs.feature_branch }}}"
-          ISSUE_BODY="${ISSUE_BODY//WORKDIR_PLACEHOLDER/${{ inputs.working_directory }}}"
-          ISSUE_BODY="${ISSUE_BODY//RUN_ID_PLACEHOLDER/${{ github.run_id }}}"
-
-          # Create issue via gh CLI
+          # Create issue
           ISSUE_URL=$(gh issue create \
             --repo "$REPO" \
             --title "$ISSUE_TITLE" \
