@@ -214,6 +214,8 @@ jobs:
     name: "② Lint"
     needs: resolve
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    env:
+      OU_NAME: ${{ inputs.ou_name }}
 
     steps:
       - name: Checkout
