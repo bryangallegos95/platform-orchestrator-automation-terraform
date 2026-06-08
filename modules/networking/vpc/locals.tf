@@ -13,39 +13,41 @@
 #   CW Group: /aws/vpc/flow-logs/vpc-aw-ue1-{service}-{ambiente}
 
 locals {
+  # ── Region-derived values ────────────────────────────────────────────────
+  region_short = var.aws_region == "us-east-2" ? "ue2" : "ue1"
+
   # ── Resource names ────────────────────────────────────────────────────────
-  vpc_name = "vpc-aw-ue1-${var.service}-${var.ambiente}"
+  vpc_name = "vpc-aw-${local.region_short}-${var.service}-${var.ambiente}"
 
   # Subnets — App tier
-  snet_app_a = "snet-aw-ue1-${var.service}-private-app-a"
-  snet_app_b = "snet-aw-ue1-${var.service}-private-app-b"
+  snet_app_a = "snet-aw-${local.region_short}-${var.service}-private-app-a"
+  snet_app_b = "snet-aw-${local.region_short}-${var.service}-private-app-b"
 
   # Subnets — BDD (database) tier
-  snet_bdd_a = "snet-aw-ue1-${var.service}-private-bdd-a"
-  snet_bdd_b = "snet-aw-ue1-${var.service}-private-bdd-b"
+  snet_bdd_a = "snet-aw-${local.region_short}-${var.service}-private-bdd-a"
+  snet_bdd_b = "snet-aw-${local.region_short}-${var.service}-private-bdd-b"
 
   # Subnets — GWLB / API-GW endpoint tier
-  snet_gwlb_a = "snet-aw-ue1-${var.service}-private-gwlb-a"
-  snet_gwlb_b = "snet-aw-ue1-${var.service}-private-gwlb-b"
+  snet_gwlb_a = "snet-aw-${local.region_short}-${var.service}-private-gwlb-a"
+  snet_gwlb_b = "snet-aw-${local.region_short}-${var.service}-private-gwlb-b"
 
   # Route tables (one per AZ — all tiers in the same AZ share the same RT)
-  rt_private_a = "rt-aw-ue1-${var.service}-private-a"
-  rt_private_b = "rt-aw-ue1-${var.service}-private-b"
+  rt_private_a = "rt-aw-${local.region_short}-${var.service}-private-a"
+  rt_private_b = "rt-aw-${local.region_short}-${var.service}-private-b"
 
   # TGW attachment
-  tgw_attachment_name = "tgw-att-aw-ue1-${var.service}-${var.ambiente}"
+  tgw_attachment_name = "tgw-att-aw-${local.region_short}-${var.service}-${var.ambiente}"
 
   # Flow Logs
-  flow_log_name      = "fl-aw-ue1-${var.service}-${var.ambiente}"
+  flow_log_name      = "fl-aw-${local.region_short}-${var.service}-${var.ambiente}"
   flow_log_group     = "/aws/vpc/flow-logs/${local.vpc_name}"
-  flow_log_role_name = "iam-role-aw-ue1-${var.service}-vpc-flow-logs-${var.ambiente}"
+  flow_log_role_name = "iam-role-aw-${local.region_short}-${var.service}-vpc-flow-logs-${var.ambiente}"
 
   # ── Availability Zones ───────────────────────────────────────────────────
-  az_a = "us-east-1a" # use1-az1
-  az_b = "us-east-1b" # use1-az2
+  az_a = "${var.aws_region}a"
+  az_b = "${var.aws_region}b"
 
   # ── Tag factory ─────────────────────────────────────────────────────────
-  # Mandatory tags applied to every resource via merge(local.tags, { Name = ... })
   mandatory_tags = {
     Aplicacion         = var.aplicacion
     PropietarioRecurso = var.propietario_recurso
@@ -53,7 +55,6 @@ locals {
     CentroCosto        = var.centro_costo
     Ambiente           = var.ambiente
     ManagedBy          = "terraform"
-    Repositorio        = "platform-orchestrator-automation-terraform"
   }
 
   # Final merged tag map — used everywhere
