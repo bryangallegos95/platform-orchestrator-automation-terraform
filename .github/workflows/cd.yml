@@ -251,6 +251,7 @@ jobs:
           role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "tf-cd-${{ inputs.environment }}-${{ github.run_id }}"
+          role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
 
       # ── Init ────────────────────────────────────────────────────
       - name: Terragrunt init
