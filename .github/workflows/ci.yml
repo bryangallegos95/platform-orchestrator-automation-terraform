@@ -1,9 +1,10 @@
 # ORG-DEVOPS/.github/workflows/ci.yml
 #
-# Reusable CI workflow — triggered on Pull Request from product repos.
+# Reusable CI workflow — called by product (son) repos.
 #
 # TOOLS:
 #   - Terragrunt: wraps Terraform, backend injected via root terragrunt.hcl in son repo.
+#   - TFLint:     linting with AWS ruleset.
 #   - Infracost:  cost estimate posted as PR comment after plan.
 #
 # DYNAMIC RESOLUTION (nothing hardcoded per environment):
@@ -12,11 +13,18 @@
 #   extra_vars           → -var flags (tgw_id, service, ambiente)
 #
 # JOBS:
-#   ⓪ resolve  → derives environment, bucket, state key, runner label
-#   ① format   → terragrunt hclfmt --check
-#   ② lint     → tflint with AWS ruleset (after terragrunt init)
-#   ③ plan     → terragrunt validate + plan, posts output as PR comment
-#   ④ cost     → infracost breakdown, posts cost diff as PR comment
+#   ⓪ resolve    → derives environment, bucket, state key, runner label
+#   ① format     → terragrunt hclfmt --check
+#   ② lint       → tflint with AWS ruleset (after terragrunt init)
+#   ③ plan       → terragrunt validate + plan, uploads artifact
+#   ④ cost       → infracost breakdown
+#   ⑤ create-pr  → auto-creates PR with plan + cost as comments
+#
+# BRANCH MAPPING:
+#   dev      → dev environment
+#   testing  → qa environment
+#   preprod  → preprod environment
+#   master   → prod environment
 
 name: "[reusable] Terraform CI"
 
@@ -28,11 +36,11 @@ on:
         required: true
         type: string
       account_id:
-        description: "AWS account ID for the target environment. Provided by Port."
+        description: "AWS account ID for the target environment."
         required: true
         type: string
       ou_name:
-        description: "OU / product name — root folder in state bucket. Provided by Port."
+        description: "OU / product name — root folder in state bucket."
         required: true
         type: string
       extra_vars:
@@ -40,6 +48,26 @@ on:
           Space-separated Terraform -var overrides injected at plan time.
           Format: "key1=value1 key2=value2"
           Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
+        required: false
+        type: string
+        default: ""
+      create_pr:
+        description: "Whether CI should auto-create a Pull Request."
+        required: false
+        type: boolean
+        default: true
+      pr_source_branch:
+        description: "Source branch for the PR (e.g. feature/add-vpc or dev)."
+        required: false
+        type: string
+        default: ""
+      pr_target_branch:
+        description: "Target branch for the PR (e.g. dev, testing, preprod, master)."
+        required: false
+        type: string
+        default: ""
+      pr_title:
+        description: "Title for the auto-created PR."
         required: false
         type: string
         default: ""
@@ -78,14 +106,20 @@ on:
       environment:
         description: "Resolved environment name."
         value: ${{ jobs.resolve.outputs.environment }}
+      pr_number:
+        description: "PR number if created."
+        value: ${{ jobs.create-pr.outputs.pr_number }}
+      pr_url:
+        description: "PR URL if created."
+        value: ${{ jobs.create-pr.outputs.pr_url }}
 
 concurrency:
-  group: "tf-ci-${{ github.event.pull_request.number || github.ref_name }}-${{ github.base_ref || inputs.ou_name }}"
+  group: "tf-ci-${{ github.event.pull_request.number || github.ref_name }}-${{ inputs.ou_name }}"
   cancel-in-progress: true
 
 jobs:
   # ─────────────────────────────────────────────
-  #  RESOLVE
+  #  ⓪ RESOLVE
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve environment"
@@ -101,19 +135,19 @@ jobs:
       - name: Derive environment from branch
         id: derive
         run: |
-          BRANCH="${{ github.base_ref || github.ref_name }}"
+          BRANCH="${{ inputs.pr_target_branch || github.base_ref || github.ref_name }}"
           REPO="${{ github.event.repository.name }}"
           OU="${{ inputs.ou_name }}"
           PREFIX="${{ inputs.bucket_prefix }}"
 
           case "$BRANCH" in
-            dev)     ENV="dev"     ;;
-            qa)      ENV="qa"      ;;
-            preprod) ENV="preprod" ;;
-            prod)    ENV="prod"    ;;
-            dr)      ENV="dr"      ;;
+            dev)      ENV="dev";     ;;
+            testing)  ENV="qa";      ;;
+            preprod)  ENV="preprod"; ;;
+            master)   ENV="prod";    ;;
             *)
               echo "::error::Branch '$BRANCH' does not map to a known environment."
+              echo "::error::Valid branches: dev, testing, preprod, master"
               exit 1 ;;
           esac
 
@@ -136,8 +170,7 @@ jobs:
           echo "| Extra vars  | \`${{ inputs.extra_vars }}\` |"   >> $GITHUB_STEP_SUMMARY
 
   # ─────────────────────────────────────────────
-  #  FORMAT
-  #  terragrunt hclfmt checks .hcl files.
+  #  ① FORMAT
   # ─────────────────────────────────────────────
   format:
     name: "① Format"
@@ -147,6 +180,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -165,7 +200,7 @@ jobs:
         run: terragrunt hclfmt --check --diff
 
   # ─────────────────────────────────────────────
-  #  LINT
+  #  ② LINT
   # ─────────────────────────────────────────────
   lint:
     name: "② Lint"
@@ -175,6 +210,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -216,7 +253,7 @@ jobs:
         run: tflint --enable-plugin=aws --format=compact
 
   # ─────────────────────────────────────────────
-  #  VALIDATE + PLAN
+  #  ③ VALIDATE + PLAN
   # ─────────────────────────────────────────────
   plan:
     name: "③ Validate + Plan"
@@ -230,6 +267,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -268,9 +307,11 @@ jobs:
         run: |
           # Build -var flags from extra_vars input.
           EXTRA_VAR_FLAGS=""
-          for pair in ${{ inputs.extra_vars }}; do
-            EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
-          done
+          if [ -n "${{ inputs.extra_vars }}" ]; then
+            for pair in ${{ inputs.extra_vars }}; do
+              EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
+            done
+          fi
 
           set +e
           eval terragrunt plan \
@@ -281,76 +322,12 @@ jobs:
             2>&1 | tee plan_output.txt
           EXITCODE=${PIPESTATUS[0]}
           echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
+
           if [ "$EXITCODE" -eq "1" ]; then
             echo "::error::Terragrunt plan failed."
             exit 1
           fi
           exit 0
-
-      - name: Post plan to PR
-        uses: actions/github-script@v7
-        if: github.event_name == 'pull_request'
-        with:
-          github-token: ${{ github.token }}
-          script: |
-            const fs  = require('fs');
-            const raw = fs.readFileSync('${{ inputs.working_directory }}/plan_output.txt', 'utf8');
-            const MAX = 65000;
-            const planText = raw.length > MAX
-              ? raw.slice(0, MAX) + '\n\n⚠️ Output truncated — see Actions for full log.'
-              : raw;
-
-            const exitcode  = '${{ steps.plan.outputs.exitcode }}';
-            const noChanges = exitcode === '0';
-            const env       = '${{ needs.resolve.outputs.environment }}';
-            const bucket    = '${{ needs.resolve.outputs.bucket }}';
-            const stateKey  = '${{ needs.resolve.outputs.state_key }}';
-            const sha       = '${{ github.sha }}'.slice(0, 7);
-
-            const body = [
-              `## 🔍 Terraform Plan — \`${env}\` ${noChanges ? '✅ No changes' : '⚠️ Changes detected'}`,
-              '',
-              '| | |',
-              '|---|---|',
-              `| **Environment**  | \`${env}\` |`,
-              `| **Account ID**   | \`${{ inputs.account_id }}\` |`,
-              `| **Directory**    | \`${{ inputs.working_directory }}\` |`,
-              `| **State bucket** | \`${bucket}\` |`,
-              `| **State key**    | \`${stateKey}\` |`,
-              `| **Extra vars**   | \`${{ inputs.extra_vars }}\` |`,
-              `| **Commit**       | \`${sha}\` |`,
-              `| **Triggered by** | @${{ github.actor }} |`,
-              '',
-              noChanges
-                ? '> ℹ️ No infrastructure changes. Apply will be skipped in CD.'
-                : '> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan.',
-              '',
-              '<details><summary>📋 Plan output (expand)</summary>',
-              '',
-              '```hcl',
-              planText,
-              '```',
-              '</details>',
-            ].join('\n');
-
-            const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number,
-            });
-            for (const c of comments) {
-              if (c.user.type === 'Bot'
-                && c.body.includes('Terraform Plan')
-                && c.body.includes(`\`${env}\``)) {
-                await github.rest.issues.deleteComment({
-                  owner: context.repo.owner, repo: context.repo.repo,
-                  comment_id: c.id,
-                });
-              }
-            }
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: context.issue.number, body,
-            });
 
       - name: Build artifact name
         id: artifact_name
@@ -370,20 +347,23 @@ jobs:
           if-no-files-found: error
 
   # ─────────────────────────────────────────────
-  #  COST ESTIMATE (Infracost)
-  #  Runs only on PRs when there are changes.
-  #  Posts a cost diff comment alongside the plan.
-  #  Requires: INFRACOST_API_KEY repo secret.
+  #  ④ COST ESTIMATE (Infracost)
   # ─────────────────────────────────────────────
   cost:
     name: "④ Cost estimate"
     needs: [resolve, plan]
-    if: github.event_name == 'pull_request' && needs.plan.outputs.exitcode == '2'
+    if: needs.plan.outputs.exitcode == '2'
     runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+
+    outputs:
+      monthly_cost: ${{ steps.parse.outputs.monthly_cost }}
+      cost_diff:    ${{ steps.parse.outputs.cost_diff }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -433,9 +413,170 @@ jobs:
             --format json \
             --out-file infracost.json
 
-      - name: Post cost estimate to PR
-        uses: infracost/actions/comment@v3
+      - name: Parse cost output
+        id: parse
+        working-directory: ${{ inputs.working_directory }}
+        run: |
+          MONTHLY=$(jq -r '.totalMonthlyCost // "0.00"' infracost.json)
+          DIFF=$(jq -r '.diffTotalMonthlyCost // "0.00"' infracost.json 2>/dev/null || echo "0.00")
+          echo "monthly_cost=$MONTHLY" >> $GITHUB_OUTPUT
+          echo "cost_diff=$DIFF" >> $GITHUB_OUTPUT
+
+      - name: Upload cost artifact
+        uses: actions/upload-artifact@v4
         with:
+          name: infracost-${{ needs.resolve.outputs.environment }}-${{ github.sha }}
           path: ${{ inputs.working_directory }}/infracost.json
-          behavior: update
+          retention-days: 5
+
+  # ─────────────────────────────────────────────
+  #  ⑤ CREATE PR
+  #  Auto-creates a Pull Request with plan + cost
+  #  as comments. Only runs if create_pr=true.
+  # ─────────────────────────────────────────────
+  create-pr:
+    name: "⑤ Create PR"
+    needs: [resolve, plan, cost]
+    if: always() && inputs.create_pr && inputs.pr_source_branch != '' && inputs.pr_target_branch != '' && needs.plan.result == 'success'
+    runs-on: [self-hosted, terraform, "${{ needs.resolve.outputs.runner_label }}"]
+
+    outputs:
+      pr_number: ${{ steps.create_pr.outputs.pr_number }}
+      pr_url:    ${{ steps.create_pr.outputs.pr_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch }}
+          fetch-depth: 0
+
+      - name: Download plan output
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.plan.outputs.artifact_name }}
+          path: /tmp/plan-artifacts
+
+      - name: Create or update Pull Request
+        id: create_pr
+        uses: actions/github-script@v7
+        with:
           github-token: ${{ github.token }}
+          script: |
+            const fs = require('fs');
+            const source = '${{ inputs.pr_source_branch }}';
+            const target = '${{ inputs.pr_target_branch }}';
+            const env = '${{ needs.resolve.outputs.environment }}';
+            const exitcode = '${{ needs.plan.outputs.exitcode }}';
+            const noChanges = exitcode === '0';
+            const bucket = '${{ needs.resolve.outputs.bucket }}';
+            const stateKey = '${{ needs.resolve.outputs.state_key }}';
+            const sha = '${{ github.sha }}'.slice(0, 7);
+            const monthlyCost = '${{ needs.cost.outputs.monthly_cost || 'N/A' }}';
+            const costDiff = '${{ needs.cost.outputs.cost_diff || 'N/A' }}';
+
+            // Read plan output
+            let planText = 'Plan output not available.';
+            try {
+              const raw = fs.readFileSync('/tmp/plan-artifacts/plan_output.txt', 'utf8');
+              const MAX = 60000;
+              planText = raw.length > MAX
+                ? raw.slice(0, MAX) + '\n\n⚠️ Output truncated — see Actions for full log.'
+                : raw;
+            } catch (e) {
+              console.log('Could not read plan output:', e.message);
+            }
+
+            // Build PR title
+            const prTitle = '${{ inputs.pr_title }}' || `🚀 [${env.toUpperCase()}] Deploy infrastructure — ${sha}`;
+
+            // Build PR body
+            const body = [
+              `## 🔍 Terraform Plan — \`${env}\` ${noChanges ? '✅ No changes' : '⚠️ Changes detected'}`,
+              '',
+              '| Field | Value |',
+              '|-------|-------|',
+              `| **Environment** | \`${env}\` |`,
+              `| **Account ID** | \`${{ inputs.account_id }}\` |`,
+              `| **Directory** | \`${{ inputs.working_directory }}\` |`,
+              `| **State bucket** | \`${bucket}\` |`,
+              `| **State key** | \`${stateKey}\` |`,
+              `| **Extra vars** | \`${{ inputs.extra_vars }}\` |`,
+              `| **Commit** | \`${sha}\` |`,
+              `| **Cost (monthly)** | \`$${monthlyCost}/mo\` |`,
+              `| **Cost (diff)** | \`$${costDiff}/mo\` |`,
+              `| **Triggered by** | @${{ github.actor }} |`,
+              '',
+              noChanges
+                ? '> ℹ️ No infrastructure changes. Apply will be skipped in CD.'
+                : '> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan.',
+              '',
+              '<details><summary>📋 Plan output (expand)</summary>',
+              '',
+              '```hcl',
+              planText,
+              '```',
+              '</details>',
+              '',
+              '---',
+              '> 🤖 This PR was auto-created by the CI pipeline. Review the plan above and approve to deploy.',
+            ].join('\n');
+
+            // Check if PR already exists
+            const { data: existingPRs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${source}`,
+              base: target,
+              state: 'open',
+            });
+
+            let pr;
+            if (existingPRs.length > 0) {
+              // Update existing PR
+              pr = existingPRs[0];
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                title: prTitle,
+                body: body,
+              });
+              console.log(`Updated existing PR #${pr.number}`);
+            } else {
+              // Create new PR
+              const { data: newPR } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: prTitle,
+                body: body,
+                head: source,
+                base: target,
+              });
+              pr = newPR;
+              console.log(`Created new PR #${pr.number}`);
+            }
+
+            // Add labels
+            const labels = [`environment/${env}`, 'terraform', 'needs-review'];
+            if (env === 'prod') labels.push('production');
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              labels: labels,
+            });
+
+            // Set outputs
+            core.setOutput('pr_number', pr.number.toString());
+            core.setOutput('pr_url', pr.html_url);
+
+      - name: Post CI summary
+        run: |
+          echo "### ⑤ Pull Request" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| PR | [#${{ steps.create_pr.outputs.pr_number }}](${{ steps.create_pr.outputs.pr_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | \`${{ inputs.pr_source_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | \`${{ inputs.pr_target_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | \`${{ needs.resolve.outputs.environment }}\` |" >> $GITHUB_STEP_SUMMARY
