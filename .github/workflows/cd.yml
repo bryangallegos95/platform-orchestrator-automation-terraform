@@ -205,6 +205,7 @@ jobs:
       outcome: ${{ steps.outcome.outputs.value }}
 
     env:
+      OU_NAME: ${{ inputs.ou_name }}
       APPLY_FAILED: "false"
       ROLLBACK_OUTCOME: "n/a"
 
