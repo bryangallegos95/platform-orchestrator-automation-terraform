@@ -12,7 +12,7 @@
 #   ② lint       → tflint with AWS ruleset (plugin pre-installed in image)
 #   ③ plan       → terragrunt validate + plan, uploads artifact
 #   ④ cost       → infracost breakdown (only if changes detected)
-#   ⑤ create-pr  → auto-creates PR with plan + cost as body
+#   ⑤ create-pr  → auto-creates PR with plan + cost + DEPLOYMENT_CONTEXT metadata
 #
 # ENVIRONMENT → RUNNER TAG → REGION MAPPING:
 #   dev      → [self-hosted, terraform, dev]      → us-east-1
@@ -78,7 +78,8 @@ on:
         required: false
         type: string
         default: "terraform-apply-role"
-        # ─── Deployment context (passthrough for promotion chain) ───
+
+      # ─── Deployment context (passthrough for promotion chain) ───
       dev_account_id:
         description: "DEV account ID — passed through for promotion chain."
         required: false
@@ -134,8 +135,6 @@ concurrency:
 jobs:
   # ─────────────────────────────────────────────
   #  ⓪ RESOLVE
-  #  Derives: region, bucket, state_key
-  #  Validates: environment input is valid
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve"
@@ -155,7 +154,6 @@ jobs:
           REPO="${{ github.event.repository.name }}"
           OU="${{ inputs.ou_name }}"
 
-          # Region mapping (hardcoded — only us-east-1 and us-east-2 are enabled)
           case "$ENV" in
             dev|qa|preprod|prod)
               REGION="us-east-1"
@@ -173,12 +171,11 @@ jobs:
 
           STATE_KEY="${OU}/${REPO}/terraform.tfstate"
 
-          echo "environment=$ENV"   >> $GITHUB_OUTPUT
-          echo "region=$REGION"     >> $GITHUB_OUTPUT
-          echo "bucket=$BUCKET"     >> $GITHUB_OUTPUT
+          echo "environment=$ENV"     >> $GITHUB_OUTPUT
+          echo "region=$REGION"       >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
           echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
 
-          # Job summary
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ### ⓪ Resolved Context
           | Key | Value |
@@ -394,7 +391,6 @@ jobs:
           echo "monthly_cost=$MONTHLY" >> $GITHUB_OUTPUT
           echo "cost_diff=$DIFF" >> $GITHUB_OUTPUT
 
-          # Summary
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ### ④ Cost Estimate
           | Metric | Value |
@@ -409,12 +405,12 @@ jobs:
           name: infracost-${{ inputs.environment }}-${{ github.sha }}
           path: ${{ inputs.working_directory }}/infracost.json
           retention-days: 5
-  
+
   # ─────────────────────────────────────────────
   #  ⑤ CREATE PR
   #  Auto-creates a Pull Request with:
   #    - Plan + cost in visible body
-  #    - Deployment context as hidden HTML metadata
+  #    - DEPLOYMENT_CONTEXT as hidden HTML metadata
   #      (parsed by cd-on-merge.yml after merge)
   # ─────────────────────────────────────────────
   create-pr:
