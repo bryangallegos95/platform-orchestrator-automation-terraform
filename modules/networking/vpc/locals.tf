@@ -44,8 +44,9 @@ locals {
   flow_log_role_name = "iam-role-aw-${local.region_short}-${var.service}-vpc-flow-logs-${var.ambiente}"
 
   # ── Availability Zones ───────────────────────────────────────────────────
-  az_a = "${var.aws_region}a"
-  az_b = "${var.aws_region}b"
+  # Use physical AZ IDs to guarantee Hub↔Spoke alignment across accounts.
+  az_id_a = var.az_id_a
+  az_id_b = var.az_id_b
 
   # ── Tag factory ─────────────────────────────────────────────────────────
   mandatory_tags = {
