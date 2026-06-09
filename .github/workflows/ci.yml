@@ -593,6 +593,7 @@ jobs:
           target_branch: ${TARGET}
           region: ${REGION}
           commit_sha: ${{ github.sha }}
+          ci_run_id: ${{ github.run_id }}
           monthly_cost: ${MONTHLY_COST}
           cost_diff: ${COST_DIFF}
           -->"
