@@ -33,7 +33,7 @@ resource "aws_vpc" "this" {
 resource "aws_subnet" "app_a" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_app_a_cidr
-  availability_zone = local.az_a
+  availability_zone_id = local.az_id_a
 
   tags = merge(local.tags, {
     Name = local.snet_app_a
@@ -45,7 +45,7 @@ resource "aws_subnet" "app_a" {
 resource "aws_subnet" "app_b" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_app_b_cidr
-  availability_zone = local.az_b
+  availability_zone_id = local.az_id_b
 
   tags = merge(local.tags, {
     Name = local.snet_app_b
@@ -58,7 +58,7 @@ resource "aws_subnet" "app_b" {
 resource "aws_subnet" "bdd_a" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_bdd_a_cidr
-  availability_zone = local.az_a
+  availability_zone_id = local.az_id_a
 
   tags = merge(local.tags, {
     Name = local.snet_bdd_a
@@ -70,7 +70,7 @@ resource "aws_subnet" "bdd_a" {
 resource "aws_subnet" "bdd_b" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_bdd_b_cidr
-  availability_zone = local.az_b
+  availability_zone_id = local.az_id_b
 
   tags = merge(local.tags, {
     Name = local.snet_bdd_b
@@ -83,7 +83,7 @@ resource "aws_subnet" "bdd_b" {
 resource "aws_subnet" "gwlb_a" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_gwlb_a_cidr
-  availability_zone = local.az_a
+  availability_zone_id = local.az_id_a
 
   tags = merge(local.tags, {
     Name = local.snet_gwlb_a
@@ -95,7 +95,7 @@ resource "aws_subnet" "gwlb_a" {
 resource "aws_subnet" "gwlb_b" {
   vpc_id            = aws_vpc.this.id
   cidr_block        = var.subnet_gwlb_b_cidr
-  availability_zone = local.az_b
+  availability_zone_id = local.az_id_b
 
   tags = merge(local.tags, {
     Name = local.snet_gwlb_b
