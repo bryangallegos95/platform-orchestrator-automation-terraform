@@ -111,7 +111,6 @@ resource "aws_ec2_transit_gateway_vpc_attachment" "this" {
   transit_gateway_id = var.tgw_id
   vpc_id             = aws_vpc.this.id
 
-  # One ENI per AZ — use App subnets as attachment subnets.
   subnet_ids = [
     aws_subnet.app_a.id,
     aws_subnet.app_b.id,
@@ -120,12 +119,19 @@ resource "aws_ec2_transit_gateway_vpc_attachment" "this" {
   dns_support  = "disable"
   ipv6_support = "disable"
 
-  # If tgw_route_table_id is provided we handle association/propagation explicitly below.
-  # Otherwise, fall back to the TGW default route table.
   transit_gateway_default_route_table_association = var.tgw_route_table_id == null ? true : false
   transit_gateway_default_route_table_propagation = var.tgw_route_table_id == null ? true : false
 
   tags = merge(local.tags, { Name = local.tgw_attachment_name })
+
+  # Force full replacement when subnets are recreated (AZ change, CIDR change)
+  # Without this, Terraform tries to modify in-place → IncorrectState error
+  lifecycle {
+    replace_triggered_by = [
+      aws_subnet.app_a.id,
+      aws_subnet.app_b.id,
+    ]
+  }
 }
 
 # ── Optional: explicit TGW Route Table association ────────────────────────────
