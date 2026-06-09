@@ -232,7 +232,13 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "tf-lint-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-
+          
+      - name: Configure git for private modules
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+        env:
+          GH_PAT: ${{ secrets.GH_TOKEN }}
+          
       - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
         env:
@@ -270,7 +276,13 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "tf-plan-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-
+          
+      - name: Configure git for private modules
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+        env:
+          GH_PAT: ${{ secrets.GH_TOKEN }}
+          
       - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
         env:
@@ -368,7 +380,13 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "infracost-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-
+          
+      - name: Configure git for private modules
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+        env:
+          GH_PAT: ${{ secrets.GH_TOKEN }}
+          
       - name: Terragrunt init
         working-directory: ${{ inputs.working_directory }}
         env:
