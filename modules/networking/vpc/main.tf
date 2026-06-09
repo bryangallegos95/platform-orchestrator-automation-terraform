@@ -285,7 +285,7 @@ resource "aws_flow_log" "this" {
 resource "aws_security_group" "vpce_s3" {
   count = var.enable_s3_endpoint ? 1 : 0
 
-  name        = "sg-aw-${local.region_short}-${var.service}-s3-vpcendpoint-${var.ambiente}"
+  name        = "sgp-aw-${local.region_short}-${var.service}-s3-vpcendpoint-${var.ambiente}"
   description = "Security group to allow access to S3 VPC Endpoint"
   vpc_id      = aws_vpc.this.id
 
@@ -372,7 +372,7 @@ resource "aws_vpc_endpoint" "dynamodb" {
 resource "aws_security_group" "vpce_ec2_ssm" {
   count = var.enable_ssm_endpoints ? 1 : 0
 
-  name        = "sg-aw-${local.region_short}-${var.service}-ec2-vpcendpoint-${var.ambiente}"
+  name        = "sgp-aw-${local.region_short}-${var.service}-ec2-vpcendpoint-${var.ambiente}"
   description = "Security group to allow access to EC2/SSM VPC Endpoints"
   vpc_id      = aws_vpc.this.id
 
