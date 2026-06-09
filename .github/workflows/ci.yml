@@ -401,7 +401,7 @@ jobs:
 
       - name: Convert plan to JSON
         working-directory: ${{ inputs.working_directory }}
-        run: terragrunt show -json tfplan > tfplan.json
+        run: terragrunt show -json "$(pwd)/tfplan" > tfplan.json
 
       - name: Generate Infracost estimate
         working-directory: ${{ inputs.working_directory }}
