@@ -171,7 +171,37 @@ variable "flow_log_traffic_type" {
     error_message = "flow_log_traffic_type must be ALL, ACCEPT, or REJECT."
   }
 }
+# ── DNS ────────────────────────────────────────────────────────────────────────
+variable "enable_dns_support" {
+  description = "Enable DNS resolution in the VPC. Required for VPC endpoints."
+  type        = bool
+  default     = true
+}
 
+variable "enable_dns_hostnames" {
+  description = "Enable DNS hostnames in the VPC. Required for private hosted zones."
+  type        = bool
+  default     = true
+}
+
+# ── VPC Endpoints ──────────────────────────────────────────────────────────────
+variable "enable_ssm_endpoints" {
+  description = "Create VPC Interface Endpoints for SSM (ssm, ssmmessages, ec2messages, ec2)."
+  type        = bool
+  default     = true
+}
+
+variable "enable_s3_endpoint" {
+  description = "Create VPC Interface Endpoint for S3."
+  type        = bool
+  default     = true
+}
+
+variable "enable_dynamodb_endpoint" {
+  description = "Create VPC Gateway Endpoint for DynamoDB."
+  type        = bool
+  default     = true
+}
 # ── Mandatory Tags ────────────────────────────────────────────────────────────
 # All four tags are REQUIRED — no default values intentionally.
 

@@ -21,10 +21,8 @@
 resource "aws_vpc" "this" {
   cidr_block = var.vpc_cidr
 
-  # These are left false for pure private spoke VPCs.
-  # Set to true via extra_tags / module call if workloads need AWS DNS resolution.
-  enable_dns_support   = false
-  enable_dns_hostnames = false
+  enable_dns_support   = var.enable_dns_support
+  enable_dns_hostnames = var.enable_dns_hostnames
 
   tags = merge(local.tags, { Name = local.vpc_name })
 }
@@ -279,7 +277,198 @@ resource "aws_flow_log" "this" {
 
   tags = merge(local.tags, { Name = local.flow_log_name })
 }
+# ══════════════════════════════════════════════════════════════════════════════
+# VPC ENDPOINTS
+# ══════════════════════════════════════════════════════════════════════════════
 
+# ── Security Group — S3 Interface Endpoint ─────────────────────────────────────
+resource "aws_security_group" "vpce_s3" {
+  count = var.enable_s3_endpoint ? 1 : 0
+
+  name        = "sg-aw-${local.region_short}-${var.service}-s3-vpcendpoint-${var.ambiente}"
+  description = "Security group to allow access to S3 VPC Endpoint"
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    description = "Allow HTTPS from Subnet Apps A"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.subnet_app_a_cidr]
+  }
+
+  ingress {
+    description = "Allow HTTPS from Subnet Apps B"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.subnet_app_b_cidr]
+  }
+
+  ingress {
+    description = "Allow HTTPS from corporate network (10.0.0.0/8)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/8"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.tags, { Name = "sg-aw-${local.region_short}-${var.service}-s3-vpcendpoint-${var.ambiente}" })
+}
+
+# ── S3 Interface Endpoint ──────────────────────────────────────────────────────
+resource "aws_vpc_endpoint" "s3" {
+  count = var.enable_s3_endpoint ? 1 : 0
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = false  # S3 interface endpoints don't support private DNS
+
+  subnet_ids = [
+    aws_subnet.app_a.id,
+    aws_subnet.app_b.id,
+  ]
+
+  security_group_ids = [aws_security_group.vpce_s3[0].id]
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-s3-${var.ambiente}" })
+}
+
+# ── DynamoDB Gateway Endpoint ──────────────────────────────────────────────────
+resource "aws_vpc_endpoint" "dynamodb" {
+  count = var.enable_dynamodb_endpoint ? 1 : 0
+
+  vpc_id            = aws_vpc.this.id
+  service_name      = "com.amazonaws.${var.aws_region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+
+  route_table_ids = [
+    aws_route_table.private_a.id,
+    aws_route_table.private_b.id,
+  ]
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = ["*"]
+      Resource  = ["*"]
+    }]
+  })
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-dynamodb-${var.ambiente}" })
+}
+
+# ── Security Group — EC2/SSM Interface Endpoints (shared) ──────────────────────
+resource "aws_security_group" "vpce_ec2_ssm" {
+  count = var.enable_ssm_endpoints ? 1 : 0
+
+  name        = "sg-aw-${local.region_short}-${var.service}-ec2-vpcendpoint-${var.ambiente}"
+  description = "Security group to allow access to EC2/SSM VPC Endpoints"
+  vpc_id      = aws_vpc.this.id
+
+  ingress {
+    description = "HTTPS from VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.tags, { Name = "sg-aw-${local.region_short}-${var.service}-ec2-vpcendpoint-${var.ambiente}" })
+}
+
+# ── EC2 Interface Endpoint ─────────────────────────────────────────────────────
+resource "aws_vpc_endpoint" "ec2" {
+  count = var.enable_ssm_endpoints ? 1 : 0
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids = [
+    aws_subnet.app_a.id,
+    aws_subnet.app_b.id,
+  ]
+
+  security_group_ids = [aws_security_group.vpce_ec2_ssm[0].id]
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-ec2-${var.ambiente}" })
+}
+
+# ── SSM Interface Endpoint ─────────────────────────────────────────────────────
+resource "aws_vpc_endpoint" "ssm" {
+  count = var.enable_ssm_endpoints ? 1 : 0
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssm"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids = [
+    aws_subnet.app_a.id,
+    aws_subnet.app_b.id,
+  ]
+
+  security_group_ids = [aws_security_group.vpce_ec2_ssm[0].id]
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-ssm-${var.ambiente}" })
+}
+
+# ── SSM Messages Interface Endpoint ───────────────────────────────────────────
+resource "aws_vpc_endpoint" "ssmmessages" {
+  count = var.enable_ssm_endpoints ? 1 : 0
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.aws_region}.ssmmessages"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids = [
+    aws_subnet.app_a.id,
+    aws_subnet.app_b.id,
+  ]
+
+  security_group_ids = [aws_security_group.vpce_ec2_ssm[0].id]
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-ssmmessages-${var.ambiente}" })
+}
+
+# ── EC2 Messages Interface Endpoint ───────────────────────────────────────────
+resource "aws_vpc_endpoint" "ec2messages" {
+  count = var.enable_ssm_endpoints ? 1 : 0
+
+  vpc_id              = aws_vpc.this.id
+  service_name        = "com.amazonaws.${var.aws_region}.ec2messages"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids = [
+    aws_subnet.app_a.id,
+    aws_subnet.app_b.id,
+  ]
+
+  security_group_ids = [aws_security_group.vpce_ec2_ssm[0].id]
+
+  tags = merge(local.tags, { Name = "vpce-aw-${local.region_short}-${var.service}-ec2messages-${var.ambiente}" })
+}
 # ── Data sources ──────────────────────────────────────────────────────────────
 # Used to scope the IAM assume-role condition to the target account.
 data "aws_caller_identity" "current" {}
