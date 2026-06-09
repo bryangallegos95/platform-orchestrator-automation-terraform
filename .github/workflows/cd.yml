@@ -48,6 +48,11 @@ on:
         description: "Exit code from CI plan. 0=no changes, 2=changes."
         required: true
         type: string
+      ci_run_id:
+        description: "Workflow run ID from CI (for cross-run artifact download)."
+        required: false
+        type: string
+        default: ""
 
       # ─── Optional inputs ───────────────────────────────────────
       extra_vars:
@@ -268,6 +273,8 @@ jobs:
         with:
           name: ${{ inputs.plan_artifact_name }}
           path: ${{ inputs.working_directory }}
+          github-token: ${{ secrets.GH_TOKEN }}
+          run-id: ${{ inputs.ci_run_id }}
 
       # ── Apply ───────────────────────────────────────────────────
       - name: Terragrunt apply
