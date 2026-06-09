@@ -283,7 +283,7 @@ jobs:
 
           SECONDS=0
           set +e
-          terragrunt apply -input=false -auto-approve tfplan 2>&1 | tee apply_output.txt
+          terragrunt apply -input=false -auto-approve $(pwd)/tfplan 2>&1 | tee apply_output.txt
           CODE=$?
           DURATION=$SECONDS
 
