@@ -14,6 +14,29 @@ variable "aws_region" {
     error_message = "aws_region must be us-east-1 (primary) or us-east-2 (DR). No other regions are enabled."
   }
 }
+# ── Availability Zones ──────────────────────────────────────────────────────────────────
+variable "az_id_a" {
+  description = "Physical AZ ID for zone A (e.g. use1-az1). Must match Hub/Networking account."
+  type        = string
+  default     = "use1-az1"
+
+  validation {
+    condition     = can(regex("^use[12]-az[1-6]$", var.az_id_a))
+    error_message = "az_id_a must be a valid AZ ID like 'use1-az1'."
+  }
+}
+
+variable "az_id_b" {
+  description = "Physical AZ ID for zone B (e.g. use1-az2). Must match Hub/Networking account."
+  type        = string
+  default     = "use1-az2"
+
+  validation {
+    condition     = can(regex("^use[12]-az[1-6]$", var.az_id_b))
+    error_message = "az_id_b must be a valid AZ ID like 'use1-az2'."
+  }
+}
+
 # ── Identity ──────────────────────────────────────────────────────────────────
 variable "service" {
   description = "Short service / product name used in resource naming. E.g. 'payments', 'devops', 'bff'"
