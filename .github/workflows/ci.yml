@@ -619,11 +619,14 @@ jobs:
               --head "$SOURCE" \
               --base "$TARGET" \
               --title "$PR_TITLE" \
-              --body "$PR_BODY" \
-              --label "environment/${ENV}" \
-              --label "terraform" \
-              --label "needs-review")
+              --body "$PR_BODY")
             PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
+            
+            # Add labels (non-fatal if they don't exist)
+            gh pr edit "$PR_NUMBER" --add-label "environment/${ENV}" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --add-label "terraform" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --add-label "needs-review" 2>/dev/null || true
+
             echo "Created new PR #${PR_NUMBER}"
           fi
 
