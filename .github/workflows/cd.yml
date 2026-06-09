@@ -424,7 +424,7 @@ jobs:
       - name: Create promotion issue
         id: create_issue
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           ENV="${{ inputs.environment }}"
           NEXT_ENV="${{ inputs.next_environment }}"
