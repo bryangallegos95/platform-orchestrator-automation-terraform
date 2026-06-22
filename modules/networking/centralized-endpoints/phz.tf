@@ -2,6 +2,21 @@
 #
 # Route 53 Private Hosted Zones — override public DNS for AWS services.
 # Associated with spoke VPCs so they resolve endpoints to private IPs.
+#
+# ┌─ v1.3.1 ────────────────────────────────────────────────────────────┐
+# │ SPOKE ASSOCIATION NOW SPLITS BY ACCOUNT:                             │
+# │   • Same account as the hub PHZ  → aws_route53_zone_association      │
+# │     (single-step, single-provider — AWS REJECTS an authorization     │
+# │      for a VPC in the same account as the zone).                     │
+# │   • Different account             → aws_route53_vpc_association_      │
+# │     authorization (hub authorizes; the SPOKE account must run the    │
+# │     matching aws_route53_zone_association to ACCEPT — that accept     │
+# │     step needs spoke-account creds and is therefore OUT OF SCOPE     │
+# │     for this hub-side module).                                       │
+# │                                                                      │
+# │ The split is computed in locals.tf from each entry's account_id      │
+# │ compared to var.hub_account_id.                                      │
+# └──────────────────────────────────────────────────────────────────────┘
 
 # ── PHZ per service ───────────────────────────────────────────────────
 resource "aws_route53_zone" "endpoint" {
@@ -19,7 +34,9 @@ resource "aws_route53_zone" "endpoint" {
     Name = "phz-aw-${local.region_short}-vpce-${each.key}"
   })
 
-  # PHZ must keep the primary VPC association
+  # PHZ must keep the primary VPC association. We also ignore the full vpc
+  # set so that same-account spoke associations created via the separate
+  # aws_route53_zone_association resource do not appear as drift on the zone.
   lifecycle {
     ignore_changes = [vpc]
   }
@@ -55,22 +72,26 @@ resource "aws_route53_record" "s3_wildcard" {
   }
 }
 
-# ── Cross-account PHZ VPC Associations ────────────────────────────────
-# Associates PHZs with spoke VPCs so their DNS resolves to private endpoints.
-# Requires: spoke VPC owner to accept (handled via AWS Organizations).
+# ── Same-account PHZ VPC Associations ─────────────────────────────────
+# Direct, single-step association. Used when the spoke VPC lives in the
+# SAME account as the hub PHZ (e.g. integracion-dev in the networking
+# account). This is the resource the v1.3.0 module was MISSING.
+resource "aws_route53_zone_association" "spoke_same_account" {
+  for_each = local.same_account_associations
 
-resource "aws_route53_vpc_association_authorization" "spoke" {
-  for_each = {
-    for pair in setproduct(var.endpoints, var.spoke_vpc_associations) :
-    "${pair[0]}-${pair[1].vpc_id}" => {
-      endpoint = pair[0]
-      vpc_id   = pair[1].vpc_id
-      region   = pair[1].region
-    }
-  }
+  zone_id    = aws_route53_zone.endpoint[each.value.endpoint].zone_id
+  vpc_id     = each.value.vpc_id
+  vpc_region = each.value.region
+}
 
-  zone_id = aws_route53_zone.endpoint[each.value.endpoint].zone_id
-  vpc_id  = each.value.vpc_id
+# ── Cross-account PHZ VPC Association Authorizations ───────────────────
+# Hub-side AUTHORIZATION only. The spoke account must then run a matching
+# aws_route53_zone_association (with its own credentials) to ACCEPT. That
+# accept step is intentionally NOT in this module — see the runbook.
+resource "aws_route53_vpc_association_authorization" "spoke_cross_account" {
+  for_each = local.cross_account_associations
 
+  zone_id    = aws_route53_zone.endpoint[each.value.endpoint].zone_id
+  vpc_id     = each.value.vpc_id
   vpc_region = each.value.region
 }
