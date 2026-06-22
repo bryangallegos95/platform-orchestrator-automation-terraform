@@ -184,24 +184,6 @@ variable "enable_dns_hostnames" {
   default     = true
 }
 
-# ── VPC Endpoints ──────────────────────────────────────────────────────────────
-variable "enable_ssm_endpoints" {
-  description = "Create VPC Interface Endpoints for SSM (ssm, ssmmessages, ec2messages, ec2)."
-  type        = bool
-  default     = true
-}
-
-variable "enable_s3_endpoint" {
-  description = "Create VPC Interface Endpoint for S3."
-  type        = bool
-  default     = true
-}
-
-variable "enable_dynamodb_endpoint" {
-  description = "Create VPC Gateway Endpoint for DynamoDB."
-  type        = bool
-  default     = true
-}
 # ── Mandatory Tags ────────────────────────────────────────────────────────────
 # All four tags are REQUIRED — no default values intentionally.
 
