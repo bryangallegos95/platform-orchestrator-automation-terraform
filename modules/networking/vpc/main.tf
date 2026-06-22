@@ -16,6 +16,9 @@
 #   - IGW, NAT GW, Elastic IPs
 #   - Transit Gateway itself
 #   - Hub VPC, Hub route tables
+#   - VPC Endpoints (S3, SSM, EC2, etc.) — created ONCE in the Egress VPC via
+#     modules/networking/centralized-endpoints; spokes resolve them through
+#     Route 53 Private Hosted Zone associations (not per-spoke endpoints)
 
 # ── VPC ───────────────────────────────────────────────────────────────────────
 resource "aws_vpc" "this" {

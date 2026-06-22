@@ -173,13 +173,13 @@ variable "flow_log_traffic_type" {
 }
 # ── DNS ────────────────────────────────────────────────────────────────────────
 variable "enable_dns_support" {
-  description = "Enable DNS resolution in the VPC. Required for VPC endpoints."
+  description = "Enable DNS resolution in the VPC. Required for resolving centralized VPC endpoints (S3, SSM, EC2, etc.) via the Route 53 Private Hosted Zones associated from the Egress VPC."
   type        = bool
   default     = true
 }
 
 variable "enable_dns_hostnames" {
-  description = "Enable DNS hostnames in the VPC. Required for private hosted zones."
+  description = "Enable DNS hostnames in the VPC. Required for Route 53 Private Hosted Zone associations that resolve centralized VPC endpoints in the Egress VPC."
   type        = bool
   default     = true
 }
