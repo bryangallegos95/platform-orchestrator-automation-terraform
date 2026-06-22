@@ -98,33 +98,3 @@ output "flow_log_group_arn" {
   description = "CloudWatch Log Group ARN — use for metric filters or subscription filters."
   value       = aws_cloudwatch_log_group.flow_logs.arn
 }
-# ── VPC Endpoints ─────────────────────────────────────────────────────────────
-output "vpce_s3_id" {
-  description = "VPC Endpoint ID for S3 (if enabled)."
-  value       = var.enable_s3_endpoint ? aws_vpc_endpoint.s3[0].id : null
-}
-
-output "vpce_dynamodb_id" {
-  description = "VPC Endpoint ID for DynamoDB (if enabled)."
-  value       = var.enable_dynamodb_endpoint ? aws_vpc_endpoint.dynamodb[0].id : null
-}
-
-output "vpce_ssm_id" {
-  description = "VPC Endpoint ID for SSM (if enabled)."
-  value       = var.enable_ssm_endpoints ? aws_vpc_endpoint.ssm[0].id : null
-}
-
-output "vpce_ec2_id" {
-  description = "VPC Endpoint ID for EC2 (if enabled)."
-  value       = var.enable_ssm_endpoints ? aws_vpc_endpoint.ec2[0].id : null
-}
-
-output "vpce_sg_s3_id" {
-  description = "Security Group ID for S3 VPC endpoint."
-  value       = var.enable_s3_endpoint ? aws_security_group.vpce_s3[0].id : null
-}
-
-output "vpce_sg_ec2_ssm_id" {
-  description = "Security Group ID for EC2/SSM VPC endpoints."
-  value       = var.enable_ssm_endpoints ? aws_security_group.vpce_ec2_ssm[0].id : null
-}
