@@ -13,6 +13,15 @@
 #   CW Group: /aws/vpc/flow-logs/vpc-aw-ue1-{service}-{ambiente}
 
 locals {
+  # ── ROSA HCP Enabled ────────────────────────────────────────────────
+  rosa_subnet_tags = var.rosa_enabled ? {
+    "bancointernacional.ec/rosa"      = "true"
+    "bancointernacional.ec/rosa-tier" = "private"
+    "bancointernacional.ec/dominio"   = var.service
+    "bancointernacional.ec/env"       = var.ambiente
+    "kubernetes.io/role/internal-elb" = "1"
+  } : {}
+
   # ── Region-derived values ────────────────────────────────────────────────
   region_short = var.aws_region == "us-east-2" ? "ue2" : "ue1"
 
