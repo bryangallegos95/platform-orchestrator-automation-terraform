@@ -40,7 +40,7 @@ resource "aws_subnet" "app_a" {
     Name = local.snet_app_a
     Tier = "app"
     AZ   = "a"
-  })
+  }, local.rosa_subnet_tags)
 }
 
 resource "aws_subnet" "app_b" {
@@ -52,7 +52,7 @@ resource "aws_subnet" "app_b" {
     Name = local.snet_app_b
     Tier = "app"
     AZ   = "b"
-  })
+  }, local.rosa_subnet_tags)
 }
 
 # ── Subnets — BDD (database) tier ─────────────────────────────────��──────────
