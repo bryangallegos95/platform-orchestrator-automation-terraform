@@ -120,8 +120,8 @@ resource "aws_ec2_transit_gateway_vpc_attachment" "this" {
   dns_support  = "disable"
   ipv6_support = "disable"
 
-  transit_gateway_default_route_table_association = var.tgw_route_table_id == null ? true : false
-  transit_gateway_default_route_table_propagation = var.tgw_route_table_id == null ? true : false
+  transit_gateway_default_route_table_association = (var.tgw_route_table_id == null && var.tgw_manage_route_table) ? true : false
+  transit_gateway_default_route_table_propagation = (var.tgw_route_table_id == null && var.tgw_manage_route_table) ? true : false
 
   tags = merge(local.tags, { Name = local.tgw_attachment_name })
 
@@ -140,14 +140,14 @@ resource "aws_ec2_transit_gateway_vpc_attachment" "this" {
 # This lets the Hub team control which TGW RT each spoke propagates into
 # without touching this module.
 resource "aws_ec2_transit_gateway_route_table_association" "this" {
-  count = var.tgw_route_table_id != null ? 1 : 0
+  count = (var.tgw_route_table_id != null && var.tgw_manage_route_table) ? 1 : 0
 
   transit_gateway_attachment_id  = aws_ec2_transit_gateway_vpc_attachment.this.id
   transit_gateway_route_table_id = var.tgw_route_table_id
 }
 
 resource "aws_ec2_transit_gateway_route_table_propagation" "this" {
-  count = var.tgw_route_table_id != null ? 1 : 0
+  count = (var.tgw_route_table_id != null && var.tgw_manage_route_table) ? 1 : 0
 
   transit_gateway_attachment_id  = aws_ec2_transit_gateway_vpc_attachment.this.id
   transit_gateway_route_table_id = var.tgw_route_table_id
