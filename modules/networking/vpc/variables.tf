@@ -3,6 +3,13 @@
 # All inputs for the Spoke VPC module.
 # CIDRs come from Port.io via the caller workflow (terraform.tfvars).
 # Mandatory tags are enforced at the variable level — no default values.
+
+# ── ROSA HCP Enabled ───────────────────────────────────────────────────────────────────
+variable "rosa_enabled" {
+  description = "If true, tag the private app subnets for ROSA HCP discovery (bancointernacional.ec/rosa contract). Set true only for VPCs that will host a ROSA cluster."
+  type        = bool
+  default     = false
+}
 # ── Region ───────────────────────────────────────────────────────────────────
 variable "aws_region" {
   description = "AWS region where resources will be created. Used by the provider block generated in root terragrunt.hcl."
