@@ -155,7 +155,11 @@ variable "tgw_route_table_id" {
   type        = string
   default     = null
 }
-
+variable "tgw_manage_route_table" {
+  description= "CControls whether THIS module manages the attachment's TGW route table association/propagation. If true this module manages, if false the routing layer from netowrking hub manages"
+  type    = bool
+  default = true
+}
 # ── VPC Flow Logs ─────────────────────────────────────────────────────────────
 variable "flow_log_retention_days" {
   description = "CloudWatch Log Group retention period in days for VPC Flow Logs."
