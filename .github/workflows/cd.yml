@@ -213,7 +213,8 @@ jobs:
       OU_NAME: ${{ inputs.ou_name }}
       APPLY_FAILED: "false"
       ROLLBACK_OUTCOME: "n/a"
-
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
+      
     steps:
       # ── Skip guard ──────────────────────────────────────────────
       - name: "Skip — no changes"
