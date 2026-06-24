@@ -22,7 +22,7 @@ resource "rhcs_cluster_rosa_hcp" "this" {
   # auto-derivation (which changed/regressed in rhcs 1.7.x). Uses the
   # caller identity the provider runs as (the assumed terraform-apply-role).
   properties = {
-    rosa_creator_arn = data.aws_caller_identity.current.arn
+    rosa_creator_arn = local.rosa_creator_arn
   }
 
   # ── Private cluster (PrivateLink implied by private=true + private subnets) ──
