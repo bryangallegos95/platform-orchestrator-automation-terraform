@@ -64,8 +64,7 @@ variable "ebs_kms_key_arn" {
 
     - integracion: pass the SHARED key ARN (same for all integracion clusters).
     - negocio:     pass the cluster's INDIVIDUAL key ARN.
-    - If empty (""), no grants are created (use only when EBS uses the AWS-managed
-      aws/ebs key, i.e. no custom CMK).
+    - "" (empty)   => no grants (only when EBS uses the AWS-managed aws/ebs key).
   EOT
   type    = string
   default = ""
