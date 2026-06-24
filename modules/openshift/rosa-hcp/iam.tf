@@ -5,7 +5,7 @@
 
 module "oidc_config_and_provider" {
   source  = "terraform-redhat/rosa-hcp/rhcs//modules/oidc-config-and-provider"
-  version = "~> 1.6, >= 1.6.2"
+  version = "~> 1.6.2"
 
   managed = true
   tags    = local.tags
@@ -13,7 +13,7 @@ module "oidc_config_and_provider" {
 
 module "operator_roles" {
   source  = "terraform-redhat/rosa-hcp/rhcs//modules/operator-roles"
-  version = "~> 1.6, >= 1.6.2"
+  version = "~> 1.6.2"
 
   operator_role_prefix = var.cluster_name
   oidc_endpoint_url    = module.oidc_config_and_provider.oidc_endpoint_url
