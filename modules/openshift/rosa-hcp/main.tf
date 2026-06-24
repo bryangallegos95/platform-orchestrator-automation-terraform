@@ -34,6 +34,13 @@ resource "rhcs_cluster_rosa_hcp" "this" {
   # AZs the cluster spans — derived from the same discovered pool subnets.
   availability_zones = local.cluster_availability_zones
 
+  # ── Security / instance hardening ───────────────────────────────────────────
+  # IMDSv2 only (session-oriented, prevents SSRF credential theft). Bank standard.
+  ec2_metadata_http_tokens = var.ec2_metadata_http_tokens
+
+  # Worker root disk size (GiB).
+  worker_disk_size = var.worker_disk_size
+
   # ── STS / IAM wiring ────────────────────────────────────────────────────────
   sts = {
     operator_role_prefix = var.cluster_name
@@ -65,6 +72,9 @@ resource "rhcs_hcp_machine_pool" "this" {
 
   cluster = rhcs_cluster_rosa_hcp.this.id
   name    = each.value.name
+
+  # Auto-replace unhealthy worker nodes (ROSA node auto-repair). Required arg.
+  auto_repair = true
 
   aws_node_pool = {
     instance_type = var.compute_machine_type
