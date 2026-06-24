@@ -50,4 +50,18 @@ locals {
   }
 
   tags = merge(local.mandatory_tags, local.platform_tags, var.extra_tags)
+
+  # data.aws_caller_identity.current.arn is the STS *session* ARN, e.g.:
+  #   arn:aws:sts::124355669898:assumed-role/terraform-apply-role/<SESSION>
+  # The <SESSION> suffix changes every run (gha-cd-cluster, tf-plan-dev-NNNN),
+  # which would cause perpetual drift if used directly. Convert to the stable
+  # IAM role ARN that ROSA expects:
+  #   arn:aws:iam::124355669898:role/terraform-apply-role
+  _caller_arn = data.aws_caller_identity.current.arn
+
+  rosa_creator_arn = can(regex(":assumed-role/", local._caller_arn)) ? format(
+    "arn:aws:iam::%s:role/%s",
+    data.aws_caller_identity.current.account_id,
+    split("/", local._caller_arn)[1]   # ROLE_NAME segment
+  ) : local._caller_arn
 }
