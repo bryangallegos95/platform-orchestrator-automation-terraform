@@ -12,10 +12,6 @@
 # empty string => no grants (AWS-managed aws/ebs key in use).
 
 locals {
-  # The grantee roles that must use the CMK for EBS encrypt/decrypt + grants:
-  #  - Worker role        : EC2 worker instance profile (boot encrypted root vol)
-  #  - capa-controller    : launches/manages the EC2 workers
-  #  - ebs-csi credentials: provisions/attaches encrypted PVs
   kms_grantee_role_arns = var.ebs_kms_key_arn == "" ? {} : {
     worker = "arn:aws:iam::${var.aws_account_id}:role/${var.account_role_prefix}-HCP-ROSA-Worker-Role"
     capa   = "arn:aws:iam::${var.aws_account_id}:role/${var.cluster_name}-kube-system-capa-controller-manager"
@@ -41,8 +37,8 @@ resource "aws_kms_grant" "rosa_ebs" {
     "CreateGrant",
   ]
 
-  # The roles are created by module.operator_roles (operator roles) and by
-  # account-bootstrap (worker role). Ensure grants come AFTER the operator roles
-  # exist — solves the chicken-and-egg without manual mid-apply steps.
+  # Operator roles (capa, ebs-csi) are created by module.operator_roles; the
+  # worker role by account-bootstrap. Grants must come AFTER those roles exist —
+  # this solves the chicken-and-egg automatically (no manual put-key-policy).
   depends_on = [module.operator_roles]
 }
