@@ -52,7 +52,7 @@ resource "rhcs_cluster_rosa_hcp" "this" {
     oidc_config_id = module.oidc_config_and_provider.oidc_config_id
   }
 
-  replicas             = length(var.machine_pools)
+  replicas = sum([for mp in var.machine_pools : mp.min_replicas])
   compute_machine_type = var.compute_machine_type
 
   tags = local.tags
