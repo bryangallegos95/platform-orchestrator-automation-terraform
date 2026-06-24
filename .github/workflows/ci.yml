@@ -218,6 +218,7 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
 
     steps:
       - name: Checkout
@@ -258,6 +259,7 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
       
     outputs:
       exitcode:      ${{ steps.plan.outputs.exitcode }}
@@ -363,6 +365,7 @@ jobs:
     env:
       OU_NAME: ${{ inputs.ou_name }}
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
       
     outputs:
       monthly_cost: ${{ steps.parse.outputs.monthly_cost }}
