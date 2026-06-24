@@ -55,6 +55,22 @@ variable "aws_account_id" {
   }
 }
 
+# ── KMS (EBS default-encryption CMK the workers/CSI must use) ─────────────────
+variable "ebs_kms_key_arn" {
+  description = <<-EOT
+    ARN of the customer-managed KMS key used for EBS default encryption in this
+    account. The module creates aws_kms_grants so the ROSA worker + operator
+    roles can use it (required when EbsEncryptionByDefault uses a CMK).
+
+    - integracion: pass the SHARED key ARN (same for all integracion clusters).
+    - negocio:     pass the cluster's INDIVIDUAL key ARN.
+    - If empty (""), no grants are created (use only when EBS uses the AWS-managed
+      aws/ebs key, i.e. no custom CMK).
+  EOT
+  type    = string
+  default = ""
+}
+
 # ── OpenShift (fleet pin) ─────────────────────────────────────────────────────
 variable "openshift_version" {
   description = "Exact OpenShift Z-stream. Fleet pin 4.20.25. MUST be ROSA-HCP-available — verify with 'rosa list versions --hosted-cp'."
