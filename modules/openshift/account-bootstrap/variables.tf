@@ -24,17 +24,6 @@ variable "account_role_prefix" {
   }
 }
 
-variable "openshift_version_minor" {
-  description = "Major.minor OpenShift version the account-role policies target (version-aware). Fleet standard: 4.20."
-  type        = string
-  default     = "4.20"
-
-  validation {
-    condition     = can(regex("^4\\.[0-9]+$", var.openshift_version_minor))
-    error_message = "openshift_version_minor must be major.minor like 4.20."
-  }
-}
-
 # ── Mandatory tags (org contract — all four required, no defaults) ────────────
 variable "aplicacion" {
   description = "[MANDATORY TAG] Application that owns this resource."
