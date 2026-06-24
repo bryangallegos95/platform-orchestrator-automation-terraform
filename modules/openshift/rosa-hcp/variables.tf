@@ -122,7 +122,28 @@ variable "compute_machine_type" {
   type        = string
   default     = "m6a.xlarge"
 }
+# ── Instance hardening ────────────────────────────────────────────────────────
+variable "ec2_metadata_http_tokens" {
+  description = "IMDS mode. 'required' = IMDSv2 only (recommended/bank standard). 'optional' = IMDSv1+v2."
+  type        = string
+  default     = "required"
 
+  validation {
+    condition     = contains(["required", "optional"], var.ec2_metadata_http_tokens)
+    error_message = "ec2_metadata_http_tokens must be 'required' or 'optional'."
+  }
+}
+
+variable "worker_disk_size" {
+  description = "Worker node root disk size in GiB. Fleet default 120 (dev). ROSA hard default is 300."
+  type        = number
+  default     = 120
+
+  validation {
+    condition     = var.worker_disk_size >= 75 && var.worker_disk_size <= 16384
+    error_message = "worker_disk_size must be between 75 and 16384 GiB."
+  }
+}
 # ── Networking (machine CIDR auto-derived from VPC; pod/service = ROSA default) ─
 variable "pod_cidr" {
   description = "Pod CIDR (ROSA default 10.128.0.0/14). Must not overlap VPC/machine CIDR."
