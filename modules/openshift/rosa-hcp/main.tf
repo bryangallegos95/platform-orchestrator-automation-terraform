@@ -19,9 +19,8 @@ resource "rhcs_cluster_rosa_hcp" "this" {
 
   version = var.openshift_version
 
-  # ── Private cluster (PrivateLink) ───────────────────────────────────────────
-  private          = true
-  aws_private_link = true
+  # ── Private cluster (PrivateLink implied by private=true + private subnets) ──
+  private = true
 
   # ── Networking ──────────────────────────────────────────────────────────────
   machine_cidr = local.machine_cidr   # = discovered VPC CIDR (auto-derived)
@@ -31,6 +30,9 @@ resource "rhcs_cluster_rosa_hcp" "this" {
 
   # Subnets discovered by tag — union of all pools' AZ subnets.
   aws_subnet_ids = local.cluster_subnet_ids
+
+  # AZs the cluster spans — derived from the same discovered pool subnets.
+  availability_zones = local.cluster_availability_zones
 
   # ── STS / IAM wiring ────────────────────────────────────────────────────────
   sts = {
@@ -43,7 +45,6 @@ resource "rhcs_cluster_rosa_hcp" "this" {
     oidc_config_id = module.oidc_config_and_provider.oidc_config_id
   }
 
-  # Initial compute hint; real scaling is governed by the machine pools below.
   replicas             = length(var.machine_pools)
   compute_machine_type = var.compute_machine_type
 
