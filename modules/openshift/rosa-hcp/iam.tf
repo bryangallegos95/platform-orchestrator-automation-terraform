@@ -16,7 +16,6 @@ module "operator_roles" {
   version = "~> 1.6, >= 1.6.2"
 
   operator_role_prefix = var.cluster_name
-  account_role_prefix  = var.account_role_prefix
   oidc_endpoint_url    = module.oidc_config_and_provider.oidc_endpoint_url
 
   tags = local.tags
