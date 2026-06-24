@@ -18,6 +18,12 @@ resource "rhcs_cluster_rosa_hcp" "this" {
   aws_billing_account_id = var.aws_account_id
 
   version = var.openshift_version
+  # Explicitly set the creator ARN so it doesn't depend on provider
+  # auto-derivation (which changed/regressed in rhcs 1.7.x). Uses the
+  # caller identity the provider runs as (the assumed terraform-apply-role).
+  properties = {
+    rosa_creator_arn = data.aws_caller_identity.current.arn
+  }
 
   # ── Private cluster (PrivateLink implied by private=true + private subnets) ──
   private = true
