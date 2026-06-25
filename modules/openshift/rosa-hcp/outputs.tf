@@ -41,3 +41,13 @@ output "machine_cidr_used" {
   description = "Machine CIDR derived from the discovered VPC."
   value       = local.machine_cidr
 }
+
+output "cp_security_group_id" {
+  description = "ID of the additional Security Group associated with the ROSA HCP Control-Plane PrivateLink endpoint. Null when cp_ingress_cidrs is empty."
+  value       = length(var.cp_ingress_cidrs) > 0 ? aws_security_group.rosa_cp[0].id : null
+}
+
+output "cp_vpc_endpoint_id" {
+  description = "ID of the ROSA HCP Control-Plane PrivateLink VPC Endpoint discovered in the cluster VPC. Null when cp_ingress_cidrs is empty."
+  value       = length(var.cp_ingress_cidrs) > 0 ? data.aws_vpc_endpoint.rosa_api[0].id : null
+}
