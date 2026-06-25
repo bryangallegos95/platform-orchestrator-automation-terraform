@@ -201,6 +201,31 @@ variable "host_prefix" {
   default     = 23
 }
 
+# ── Control-Plane PrivateLink Endpoint — additional Security Group ────────────
+variable "cp_ingress_cidrs" {
+  description = <<-EOT
+    CIDR blocks allowed HTTPS (port 443) inbound access to the ROSA HCP
+    Control-Plane PrivateLink Endpoint. Each CIDR generates an independent
+    aws_vpc_security_group_ingress_rule on a dedicated Security Group that is
+    additively associated with the API VPC endpoint.
+
+    Leave empty (default) to skip SG creation entirely — useful when access
+    is already covered by the VPC default SG or TGW security policies.
+
+    Bank-standard values (set in ALL cluster invocations):
+      ["10.0.0.0/8", "172.16.0.0/16", "172.27.0.0/16"]
+
+    Requires ROSA >= 4.17.2 (fleet standard: 4.20.25 ✅).
+  EOT
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for cidr in var.cp_ingress_cidrs : can(cidrnetmask(cidr))])
+    error_message = "All entries in cp_ingress_cidrs must be valid CIDR blocks (e.g. '10.0.0.0/8')."
+  }
+}
+
 # ── Mandatory tags (org contract — all four required, no defaults) ────────────
 variable "aplicacion" {
   description = "[MANDATORY TAG] Application that owns this resource."
