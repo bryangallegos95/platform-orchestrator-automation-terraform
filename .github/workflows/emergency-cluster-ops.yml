@@ -1,0 +1,360 @@
+# bin-transversales-devops/platform-orchestrator-automation-terraform
+# .github/workflows/emergency-cluster-ops.yml
+#
+# Reusable EMERGENCY workflow — replace or destroy a ROSA HCP cluster.
+#
+# ⚠️ DESTRUCTIVE. workflow_dispatch (via caller) ONLY. dev/qa ONLY (conservative).
+#
+# USE CASES:
+#   - replace : recreate the cluster resource (e.g. immutable field change like
+#               pod_cidr). rhcs provider does NOT mark pod_cidr as ForceNew, so a
+#               normal apply plans a dangerous "update in-place". This forces a
+#               clean destroy+create via `terragrunt apply -replace=<resource>`.
+#   - destroy : tear down the whole component (failed/partial install cleanup).
+#
+# GUARDRAILS:
+#   - confirm_cluster_name must EXACTLY match the derived cluster name.
+#   - environment restricted to dev|qa (regulated prod/dr blocked by design).
+#   - GitHub Environment gate on the execute job.
+#   - Pre-flight describe + full audit summary.
+#
+# JOBS:
+#   ⓪ resolve   → derive region/bucket + echo target
+#   ① guard     → validate confirm_cluster_name == cluster_name; block prod/dr
+#   ② preflight → show current state (terragrunt state list)
+#   ③ execute   → terragrunt apply -replace=<res>  OR  terragrunt destroy
+#   ④ audit     → always: write summary (caller may also open an Issue)
+
+name: "[reusable] 🔴 Emergency Cluster Ops"
+
+on:
+  workflow_call:
+    inputs:
+      # ─── Required ──────────────────────────────────────────────
+      environment:
+        description: "Target environment: dev | qa (regulated tiers blocked)."
+        required: true
+        type: string
+      working_directory:
+        description: "Path to the cluster Terragrunt component (caller-derived)."
+        required: true
+        type: string
+      account_id:
+        description: "AWS account ID for the target environment."
+        required: true
+        type: string
+      ou_name:
+        description: "OU / product name — root folder in state bucket."
+        required: true
+        type: string
+      operation:
+        description: "replace | destroy"
+        required: true
+        type: string
+      cluster_name:
+        description: "Derived cluster name (e.g. int-dev) — source of truth for the guard."
+        required: true
+        type: string
+      confirm_cluster_name:
+        description: "User-typed confirmation. MUST equal cluster_name or the run aborts."
+        required: true
+        type: string
+
+      # ─── Optional ──────────────────────────────────────────────
+      target_resource:
+        description: "Resource to -replace (operation=replace only)."
+        required: false
+        type: string
+        default: "rhcs_cluster_rosa_hcp.this"
+      extra_vars:
+        description: "Space-separated -var overrides (operation=destroy re-evaluates vars)."
+        required: false
+        type: string
+        default: ""
+      target_role_name:
+        description: "IAM role name to assume in target account."
+        required: false
+        type: string
+        default: "terraform-apply-role"
+
+    outputs:
+      outcome:
+        description: "success | failed | aborted"
+        value: ${{ jobs.execute.outputs.outcome }}
+
+# One destructive op per env/component at a time. NEVER cancel mid-flight.
+concurrency:
+  group: "tf-emergency-${{ inputs.environment }}-${{ inputs.ou_name }}"
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────
+  #  ⓪ RESOLVE
+  # ─────────────────────────────────────────────
+  resolve:
+    name: "⓪ Resolve"
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    outputs:
+      region:    ${{ steps.derive.outputs.region }}
+      bucket:    ${{ steps.derive.outputs.bucket }}
+      state_key: ${{ steps.derive.outputs.state_key }}
+    steps:
+      - name: Derive infrastructure context
+        id: derive
+        run: |
+          ENV="${{ inputs.environment }}"
+          REPO="${{ github.event.repository.name }}"
+          OU="${{ inputs.ou_name }}"
+
+          case "$ENV" in
+            dev|qa)
+              REGION="us-east-1"
+              BUCKET="s3-aw-ue1-terraform-state-${ENV}"
+              ;;
+            *)
+              echo "::error::❌ Emergency ops are restricted to dev|qa. Got '$ENV'."
+              exit 1
+              ;;
+          esac
+
+          STATE_KEY="${OU}/${REPO}/terraform.tfstate"
+
+          echo "region=$REGION"       >> $GITHUB_OUTPUT
+          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
+          echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ⓪ Emergency Context
+          | Key | Value |
+          |-----|-------|
+          | Operation | \`${{ inputs.operation }}\` |
+          | Environment | \`${ENV}\` |
+          | Cluster | \`${{ inputs.cluster_name }}\` |
+          | Region | \`${REGION}\` |
+          | Bucket | \`${BUCKET}\` |
+          | Directory | \`${{ inputs.working_directory }}\` |
+          | Account ID | \`${{ inputs.account_id }}\` |
+          | Triggered by | @${{ github.actor }} |
+          EOF
+
+  # ─────────────────────────────────────────────
+  #  ① GUARD — confirmation + tier + operation validation
+  # ─────────────────────────────────────────────
+  guard:
+    name: "① Guard"
+    needs: resolve
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    steps:
+      - name: Validate operation
+        run: |
+          OP="${{ inputs.operation }}"
+          if [ "$OP" != "replace" ] && [ "$OP" != "destroy" ]; then
+            echo "::error::❌ operation must be 'replace' or 'destroy'. Got '$OP'."
+            exit 1
+          fi
+
+      - name: Block regulated tiers (defense in depth)
+        run: |
+          ENV="${{ inputs.environment }}"
+          case "$ENV" in
+            preprod|prod|dr)
+              echo "::error::🚫 '$ENV' is regulated (SB-2023-01901). Blocked in this workflow."
+              echo "::error::Use the controlled manual process for regulated tiers."
+              exit 1
+              ;;
+          esac
+          echo "✅ '$ENV' is a non-regulated tier — allowed."
+
+      - name: Confirm cluster name match
+        run: |
+          EXPECTED="${{ inputs.cluster_name }}"
+          TYPED="${{ inputs.confirm_cluster_name }}"
+          echo "Expected cluster : '$EXPECTED'"
+          echo "Typed confirm    : '$TYPED'"
+          if [ "$EXPECTED" != "$TYPED" ]; then
+            echo "::error::❌ Confirmation mismatch. Typed '$TYPED' ≠ target '$EXPECTED'. ABORTING."
+            exit 1
+          fi
+          echo "✅ Confirmation matches. Proceeding with ${{ inputs.operation }} on '$EXPECTED'."
+
+      - name: Guard summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ① Guard: ✅ Passed
+          | Check | Result |
+          |-------|--------|
+          | Operation valid | ✅ \`${{ inputs.operation }}\` |
+          | Tier non-regulated | ✅ \`${{ inputs.environment }}\` |
+          | Cluster confirmation | ✅ \`${{ inputs.cluster_name }}\` |
+          EOF
+
+  # ─────────────────────────────────────────────
+  #  ② PRE-FLIGHT — show what will be affected
+  # ─────────────────────────────────────────────
+  preflight:
+    name: "② Pre-flight"
+    needs: [resolve, guard]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    env:
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assume role in target account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
+          aws-region: ${{ needs.resolve.outputs.region }}
+          role-session-name: "tf-emrg-${{ inputs.environment }}-${{ github.run_id }}"
+          role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
+
+      - name: Terragrunt init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
+
+      - name: Show current state
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: |
+          echo "── Resources currently in state ──"
+          terragrunt state list || echo "(state empty or unreadable)"
+          echo ""
+          if [ "${{ inputs.operation }}" = "replace" ]; then
+            echo "── Will REPLACE: ${{ inputs.target_resource }} ──"
+            terragrunt state show "${{ inputs.target_resource }}" 2>/dev/null | head -40 || \
+              echo "::warning::Resource ${{ inputs.target_resource }} not found in state."
+          else
+            echo "── Will DESTROY the ENTIRE component above ──"
+          fi
+
+  # ─────────────────────────────────────────────
+  #  ③ EXECUTE — replace OR destroy (GitHub Environment gate)
+  # ─────────────────────────────────────────────
+  execute:
+    name: "③ Execute"
+    needs: [resolve, guard, preflight]
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    environment: ${{ inputs.environment }}
+    outputs:
+      outcome: ${{ steps.outcome.outputs.value }}
+    env:
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
+      OP_FAILED: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Assume role in target account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
+          aws-region: ${{ needs.resolve.outputs.region }}
+          role-session-name: "tf-emrg-exec-${{ inputs.environment }}-${{ github.run_id }}"
+          role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
+
+      - name: Terragrunt init
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: terragrunt init -reconfigure
+
+      # ── REPLACE ─────────────────────────────────────────────────
+      - name: "Terragrunt apply -replace"
+        if: inputs.operation == 'replace'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: |
+          echo "🔁 Replacing resource: ${{ inputs.target_resource }}"
+          echo "   Cluster: ${{ inputs.cluster_name }}  (${{ inputs.environment }})"
+          echo ""
+          SECONDS=0
+          set +e
+          terragrunt apply \
+            -replace="${{ inputs.target_resource }}" \
+            -input=false -auto-approve 2>&1 | tee op_output.txt
+          CODE=$?
+          echo "duration=${SECONDS}s"
+          if [ $CODE -ne 0 ]; then
+            echo "OP_FAILED=true" >> $GITHUB_ENV
+            echo "::error::❌ replace failed (exit $CODE) after ${SECONDS}s."
+          else
+            echo "✅ replace completed in ${SECONDS}s."
+          fi
+          exit 0
+
+      # ── DESTROY ─────────────────────────────────────────────────
+      - name: "Terragrunt destroy"
+        if: inputs.operation == 'destroy'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: |
+          echo "💥 Destroying component: ${{ inputs.working_directory }}"
+          echo "   Cluster: ${{ inputs.cluster_name }}  (${{ inputs.environment }})"
+          echo ""
+          EXTRA_VAR_FLAGS=""
+          if [ -n "${{ inputs.extra_vars }}" ]; then
+            for pair in ${{ inputs.extra_vars }}; do
+              EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
+            done
+          fi
+          SECONDS=0
+          set +e
+          eval terragrunt destroy $EXTRA_VAR_FLAGS -input=false -auto-approve 2>&1 | tee op_output.txt
+          CODE=$?
+          echo "duration=${SECONDS}s"
+          if [ $CODE -ne 0 ]; then
+            echo "OP_FAILED=true" >> $GITHUB_ENV
+            echo "::error::❌ destroy failed (exit $CODE) after ${SECONDS}s."
+            echo "::error::State: s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}"
+          else
+            echo "✅ destroy completed in ${SECONDS}s. State is clean."
+          fi
+          exit 0
+
+      - name: Set outcome
+        id: outcome
+        if: always()
+        run: |
+          if [ "$OP_FAILED" = "true" ]; then
+            echo "value=failed" >> $GITHUB_OUTPUT
+          else
+            echo "value=success" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail job on error
+        if: env.OP_FAILED == 'true'
+        run: exit 1
+
+  # ─────────────────────────────────────────────
+  #  ④ AUDIT — always summarize (regulatory trace)
+  # ─────────────────────────────────────────────
+  audit:
+    name: "④ Audit"
+    needs: [resolve, guard, preflight, execute]
+    if: always()
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    steps:
+      - name: Write audit summary
+        run: |
+          OUTCOME="${{ needs.execute.outputs.outcome }}"
+          [ -z "$OUTCOME" ] && OUTCOME="aborted"
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ④ Emergency Op — Audit
+          | Field | Value |
+          |-------|-------|
+          | **Operation** | \`${{ inputs.operation }}\` |
+          | **Cluster** | \`${{ inputs.cluster_name }}\` |
+          | **Environment** | \`${{ inputs.environment }}\` |
+          | **Target resource** | \`${{ inputs.target_resource }}\` |
+          | **Outcome** | \`${OUTCOME}\` |
+          | **Account** | \`${{ inputs.account_id }}\` |
+          | **State** | \`s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}\` |
+          | **Triggered by** | @${{ github.actor }} |
+          | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          EOF
