@@ -1,16 +1,24 @@
 # bin-transversales-devops/platform-orchestrator-automation-terraform
 # .github/workflows/emergency-cluster-ops.yml
 #
-# Reusable EMERGENCY workflow — replace or destroy a ROSA HCP cluster.
+# Reusable EMERGENCY workflow — replace, recreate, or destroy a ROSA HCP cluster.
 #
 # ⚠️ DESTRUCTIVE. workflow_dispatch (via caller) ONLY. dev/qa ONLY (conservative).
 #
-# USE CASES:
-#   - replace : recreate the cluster resource (e.g. immutable field change like
-#               pod_cidr). rhcs provider does NOT mark pod_cidr as ForceNew, so a
-#               normal apply plans a dangerous "update in-place". This forces a
-#               clean destroy+create via `terragrunt apply -replace=<resource>`.
-#   - destroy : tear down the whole component (failed/partial install cleanup).
+# OPERATIONS:
+#   - replace  : -replace a specific resource. When target is the cluster, the
+#                workflow ALSO -replaces every rhcs_hcp_machine_pool in state,
+#                because a ROSA HCP cluster replacement orphans its pools (the
+#                pool 'cluster' attribute is IMMUTABLE → update-in-place fails).
+#   - recreate : full destroy + apply. The CLEANEST way to recreate a cluster
+#                (no orphaned pools, no half-applied state). Preferred for
+#                immutable-field changes (pod_cidr, service_cidr, machine_cidr).
+#   - destroy  : tear down the whole component (failed/partial install cleanup).
+#
+# ── IMPORTANT: runs against the CALLER REPO's DEFAULT BRANCH (master) ──
+# Unlike CI/CD (which uses the PR commit), this workflow checks out master.
+# Any config change (e.g. pod_cidr) MUST be committed+pushed to master BEFORE
+# running, or the operation uses STALE code. (This bit us on int-dev once.)
 #
 # GUARDRAILS:
 #   - confirm_cluster_name must EXACTLY match the derived cluster name.
@@ -20,10 +28,10 @@
 #
 # JOBS:
 #   ⓪ resolve   → derive region/bucket + echo target
-#   ① guard     → validate confirm_cluster_name == cluster_name; block prod/dr
-#   ② preflight → show current state (terragrunt state list)
-#   ③ execute   → terragrunt apply -replace=<res>  OR  terragrunt destroy
-#   ④ audit     → always: write summary (caller may also open an Issue)
+#   ① guard     → validate confirm + tier + operation
+#   ② preflight → show current state + warn about master-vs-PR
+#   ③ execute   → replace (cluster+pools) | recreate (destroy+apply) | destroy
+#   ④ audit     → always: write summary
 
 name: "[reusable] 🔴 Emergency Cluster Ops"
 
@@ -48,7 +56,7 @@ on:
         required: true
         type: string
       operation:
-        description: "replace | destroy"
+        description: "replace | recreate | destroy"
         required: true
         type: string
       cluster_name:
@@ -66,8 +74,18 @@ on:
         required: false
         type: string
         default: "rhcs_cluster_rosa_hcp.this"
+      cluster_resource_address:
+        description: "Terraform address of the cluster resource (used to detect a cluster-targeted replace so machine pools are co-replaced)."
+        required: false
+        type: string
+        default: "rhcs_cluster_rosa_hcp.this"
+      machine_pool_resource_prefix:
+        description: "Address prefix that identifies machine pool resources in state."
+        required: false
+        type: string
+        default: "rhcs_hcp_machine_pool.this"
       extra_vars:
-        description: "Space-separated -var overrides (operation=destroy re-evaluates vars)."
+        description: "Space-separated -var overrides (destroy/recreate re-evaluate vars)."
         required: false
         type: string
         default: ""
@@ -148,10 +166,13 @@ jobs:
       - name: Validate operation
         run: |
           OP="${{ inputs.operation }}"
-          if [ "$OP" != "replace" ] && [ "$OP" != "destroy" ]; then
-            echo "::error::❌ operation must be 'replace' or 'destroy'. Got '$OP'."
-            exit 1
-          fi
+          case "$OP" in
+            replace|recreate|destroy) echo "✅ operation '$OP' is valid." ;;
+            *)
+              echo "::error::❌ operation must be 'replace', 'recreate' or 'destroy'. Got '$OP'."
+              exit 1
+              ;;
+          esac
 
       - name: Block regulated tiers (defense in depth)
         run: |
@@ -189,7 +210,7 @@ jobs:
           EOF
 
   # ─────────────────────────────────────────────
-  #  ② PRE-FLIGHT — show what will be affected
+  #  ② PRE-FLIGHT — show what will be affected + master warning
   # ─────────────────────────────────────────────
   preflight:
     name: "② Pre-flight"
@@ -215,6 +236,12 @@ jobs:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
 
+      - name: Master-vs-PR warning
+        run: |
+          echo "::warning::⚠️ This workflow runs against the DEFAULT BRANCH (master), NOT a PR."
+          echo "::warning::Any config change (e.g. pod_cidr) MUST be committed to master first."
+          echo "Current commit: ${{ github.sha }}"
+
       - name: Show current state
         working-directory: ${{ inputs.working_directory }}
         env:
@@ -223,16 +250,24 @@ jobs:
           echo "── Resources currently in state ──"
           terragrunt state list || echo "(state empty or unreadable)"
           echo ""
+          POOLS=$(terragrunt state list 2>/dev/null | grep "${{ inputs.machine_pool_resource_prefix }}" || true)
+          if [ -n "$POOLS" ]; then
+            echo "── Machine pools in state (relevant for replace/recreate) ──"
+            echo "$POOLS"
+          fi
+          echo ""
           if [ "${{ inputs.operation }}" = "replace" ]; then
-            echo "── Will REPLACE: ${{ inputs.target_resource }} ──"
+            echo "── Will REPLACE: ${{ inputs.target_resource }} (+ pools if target is the cluster) ──"
             terragrunt state show "${{ inputs.target_resource }}" 2>/dev/null | head -40 || \
               echo "::warning::Resource ${{ inputs.target_resource }} not found in state."
+          elif [ "${{ inputs.operation }}" = "recreate" ]; then
+            echo "── Will DESTROY the ENTIRE component, then APPLY from master ──"
           else
             echo "── Will DESTROY the ENTIRE component above ──"
           fi
 
   # ─────────────────────────────────────────────
-  #  ③ EXECUTE — replace OR destroy (GitHub Environment gate)
+  #  ③ EXECUTE — replace (cluster+pools) | recreate | destroy
   # ─────────────────────────────────────────────
   execute:
     name: "③ Execute"
@@ -262,21 +297,49 @@ jobs:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
 
-      # ── REPLACE ─────────────────────────────────────────────────
-      - name: "Terragrunt apply -replace"
+      # ── REPLACE (cluster-aware: also replaces machine pools) ────
+      - name: "Replace"
         if: inputs.operation == 'replace'
         working-directory: ${{ inputs.working_directory }}
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
-          echo "🔁 Replacing resource: ${{ inputs.target_resource }}"
+          TARGET="${{ inputs.target_resource }}"
+          CLUSTER_ADDR="${{ inputs.cluster_resource_address }}"
+          POOL_PREFIX="${{ inputs.machine_pool_resource_prefix }}"
+
+          echo "🔁 Replace target: $TARGET"
           echo "   Cluster: ${{ inputs.cluster_name }}  (${{ inputs.environment }})"
           echo ""
+
+          # Base -replace flag for the requested target.
+          REPLACE_FLAGS="-replace=\"$TARGET\""
+
+          # If the target IS the cluster, ALSO replace every machine pool —
+          # a cluster replacement orphans pools (pool.cluster is immutable, so
+          # an update-in-place fails). Replacing them together recreates pools
+          # against the NEW cluster id.
+          if [ "$TARGET" = "$CLUSTER_ADDR" ]; then
+            echo "🔎 Target is the cluster → detecting machine pools to co-replace..."
+            POOLS=$(terragrunt state list 2>/dev/null | grep "^${POOL_PREFIX}" || true)
+            if [ -n "$POOLS" ]; then
+              while IFS= read -r pool; do
+                [ -z "$pool" ] && continue
+                echo "   + co-replace pool: $pool"
+                REPLACE_FLAGS="$REPLACE_FLAGS -replace=\"$pool\""
+              done <<< "$POOLS"
+            else
+              echo "   (no machine pools in state — cluster-only replace)"
+            fi
+          fi
+
+          echo ""
+          echo "Effective: terragrunt apply $REPLACE_FLAGS"
+          echo ""
+
           SECONDS=0
           set +e
-          terragrunt apply \
-            -replace="${{ inputs.target_resource }}" \
-            -input=false -auto-approve 2>&1 | tee op_output.txt
+          eval terragrunt apply $REPLACE_FLAGS -input=false -auto-approve 2>&1 | tee op_output.txt
           CODE=$?
           echo "duration=${SECONDS}s"
           if [ $CODE -ne 0 ]; then
@@ -287,8 +350,54 @@ jobs:
           fi
           exit 0
 
+      # ── RECREATE (destroy + apply) — cleanest for immutable changes ──
+      - name: "Recreate (destroy + apply)"
+        if: inputs.operation == 'recreate'
+        working-directory: ${{ inputs.working_directory }}
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+        run: |
+          echo "♻️  Recreate (destroy + apply): ${{ inputs.cluster_name }}  (${{ inputs.environment }})"
+          echo "   Fully destroys the component, then recreates it from master."
+          echo ""
+
+          EXTRA_VAR_FLAGS=""
+          if [ -n "${{ inputs.extra_vars }}" ]; then
+            for pair in ${{ inputs.extra_vars }}; do
+              EXTRA_VAR_FLAGS="$EXTRA_VAR_FLAGS -var=\"$pair\""
+            done
+          fi
+
+          SECONDS=0
+          set +e
+
+          echo "── Phase 1: destroy ──"
+          eval terragrunt destroy $EXTRA_VAR_FLAGS -input=false -auto-approve 2>&1 | tee destroy_output.txt
+          DCODE=$?
+          if [ $DCODE -ne 0 ]; then
+            echo "OP_FAILED=true" >> $GITHUB_ENV
+            echo "::error::❌ recreate: destroy phase failed (exit $DCODE) after ${SECONDS}s."
+            echo "::error::State: s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}"
+            exit 0
+          fi
+          echo "✅ destroy phase complete (${SECONDS}s). State is clean."
+          echo ""
+
+          echo "── Phase 2: apply ──"
+          eval terragrunt apply $EXTRA_VAR_FLAGS -input=false -auto-approve 2>&1 | tee apply_output.txt
+          ACODE=$?
+          echo "duration=${SECONDS}s"
+          if [ $ACODE -ne 0 ]; then
+            echo "OP_FAILED=true" >> $GITHUB_ENV
+            echo "::error::❌ recreate: apply phase failed (exit $ACODE) after ${SECONDS}s."
+            echo "::error::Component is DESTROYED but not recreated. Re-run apply/CD to finish."
+          else
+            echo "✅ recreate complete in ${SECONDS}s (destroy + apply)."
+          fi
+          exit 0
+
       # ── DESTROY ─────────────────────────────────────────────────
-      - name: "Terragrunt destroy"
+      - name: "Destroy"
         if: inputs.operation == 'destroy'
         working-directory: ${{ inputs.working_directory }}
         env:
@@ -354,6 +463,7 @@ jobs:
           | **Target resource** | \`${{ inputs.target_resource }}\` |
           | **Outcome** | \`${OUTCOME}\` |
           | **Account** | \`${{ inputs.account_id }}\` |
+          | **Commit (master)** | \`${{ github.sha }}\` |
           | **State** | \`s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}\` |
           | **Triggered by** | @${{ github.actor }} |
           | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
