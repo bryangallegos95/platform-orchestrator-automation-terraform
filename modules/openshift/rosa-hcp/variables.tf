@@ -99,16 +99,20 @@ variable "rosa_subnet_discovery_tag" {
 # ── Machine Pools (HA via pool-per-AZ; autoscaling always on) ─────────────────
 variable "machine_pools" {
   description = <<-EOT
-    Worker MachinePools. Each pins to ONE discovered subnet (AZ) via subnet_az
-    ('a' or 'b') and autoscales between min/max.
+    workers MachinePools. Each pins to ONE discovered subnet (AZ) via subnet_az
+    ('a' or 'b') and autoscales between min/max replicas.
+
+    ⚠️ NAMING CONTRACT: the first pool MUST be named "workerss".
+    This is the name reserved for ROSA's auto-created default pool.
+    Declaring it triggers magic import (no orphan pool). See module header.
 
     non-prod (single AZ):
-      [{ name = "default", subnet_az = "a", min_replicas = 2, max_replicas = 4 }]
+      [{ name = "workers", subnet_az = "a", min_replicas = 2, max_replicas = 4 }]
 
-    prod/dr (two AZs):
+    prod/dr (two AZs — AZ-b uses an explicit additional pool):
       [
-        { name = "az-a", subnet_az = "a", min_replicas = 1, max_replicas = 2 },
-        { name = "az-b", subnet_az = "b", min_replicas = 1, max_replicas = 2 },
+        { name = "workers",   subnet_az = "a", min_replicas = 1, max_replicas = 2 },
+        { name = "workers-b", subnet_az = "b", min_replicas = 1, max_replicas = 2 },
       ]
   EOT
   type = list(object({
@@ -118,17 +122,36 @@ variable "machine_pools" {
     max_replicas = number
   }))
 
+  # ── Structural validations ─────────────────────────────────────────────────
   validation {
     condition     = length(var.machine_pools) > 0
     error_message = "At least one machine pool is required."
   }
+
   validation {
     condition     = alltrue([for mp in var.machine_pools : contains(["a", "b"], mp.subnet_az)])
-    error_message = "each machine_pools[].subnet_az must be 'a' or 'b'."
+    error_message = "Each machine_pools[].subnet_az must be 'a' or 'b'."
   }
+
   validation {
     condition     = alltrue([for mp in var.machine_pools : mp.min_replicas >= 1 && mp.max_replicas >= mp.min_replicas])
     error_message = "min_replicas >= 1 and max_replicas >= min_replicas for every pool."
+  }
+
+  # ── Magic-import contract (v1.9.0) ─────────────────────────────────────────
+  # First pool must claim the reserved default-pool name so the provider fires
+  # the import path instead of creating a second pool. The length==0 guard
+  # prevents an index-out-of-bounds if the structural validation above fails first.
+  validation {
+    condition     = length(var.machine_pools) == 0 || var.machine_pools[0].name == "workers"
+    error_message = "The first machine pool MUST be named 'workers' — the ROSA reserved default pool name. Any other name creates an orphan. See module header in main.tf."
+  }
+
+  # Additional pools must NOT steal the reserved name; "workers" is exclusively
+  # for the default pool. Only index 0 is allowed to carry that name.
+  validation {
+    condition     = alltrue([for i, mp in var.machine_pools : i == 0 || mp.name != "workers"])
+    error_message = "Only the first pool may be named 'workers'. Additional pools must use a different name (e.g., 'workers-b' for AZ-b in prod/dr)."
   }
 }
 
