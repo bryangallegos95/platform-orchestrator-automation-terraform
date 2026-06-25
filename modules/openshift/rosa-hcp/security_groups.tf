@@ -10,7 +10,7 @@
 # ROSA HCP exposes the OpenShift API (port 443) via an AWS VPC Interface Endpoint
 # (PrivateLink) created in the customer VPC. By default, AWS associates the VPC's
 # default Security Group with the endpoint. This resource adds a CUSTOM, explicit
-# SG that allows HTTPS from known internal bank networks, which is required for:
+# SG that allows HTTPS from known internal Banco Internacional networks, which is required for:
 #   - On-prem access via TGW (10.0.0.0/8)
 #   - Hub/Transit network (172.16.0.0/16)
 #   - Spoke VPCs (172.27.0.0/16)
@@ -59,7 +59,7 @@ resource "aws_security_group" "rosa_cp" {
   count = length(var.cp_ingress_cidrs) > 0 ? 1 : 0
 
   name        = "sgp-aw-${local.region_short}-${var.cluster_name}-cp"
-  description = "Additional SG for ROSA HCP Control-Plane PrivateLink endpoint. Allows HTTPS from bank internal networks. Managed by Terraform (rosa-hcp module v1.10.0)."
+  description = "Additional SG for ROSA HCP Control-Plane PrivateLink endpoint. Allows HTTPS from Banco Internacional internal networks. Managed by Terraform (rosa-hcp module v1.10.0)."
   vpc_id      = data.aws_vpc.rosa.id
 
   tags = merge(local.tags, {
@@ -78,7 +78,7 @@ resource "aws_vpc_security_group_ingress_rule" "rosa_cp_https" {
   for_each = length(var.cp_ingress_cidrs) > 0 ? toset(var.cp_ingress_cidrs) : toset([])
 
   security_group_id = aws_security_group.rosa_cp[0].id
-  description       = "HTTPS from ${each.key} — bank internal network (TGW/VPN reachable)."
+  description       = "HTTPS from ${each.key} Banco Internacional network (TGW/VPN reachable)."
   cidr_ipv4         = each.key
   from_port         = 443
   to_port           = 443
