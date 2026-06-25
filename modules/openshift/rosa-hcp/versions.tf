@@ -1,9 +1,15 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CHANGE IN: modules/openshift/rosa-hcp/versions.tf
+# Bump the module version comment header only. No functional change.
+# ──────────────────────────────────────────────────────────────────────────────
+#
 # modules/openshift/rosa-hcp/versions.tf
 #
 # ROSA HCP cluster module. Standardized fleet tool/provider versions.
 #   Terraform : ~> 1.11
 #   AWS       : ~> 6.51
 #   rhcs      : ~> 1.6.2  (PINNED to 1.6.x — do NOT allow 1.7.x; see note)
+#   Module    : v1.10.0   ← bumped from v1.9.0 (adds CP SG via PrivateLink endpoint association)
 #
 # ⚠️ rhcs PIN NOTE: "~> 1.6, >= 1.6.2" ALLOWED 1.7.x (it resolved to 1.7.7),
 # which changed the OCM auth / rosa_creator_arn derivation and broke cluster
