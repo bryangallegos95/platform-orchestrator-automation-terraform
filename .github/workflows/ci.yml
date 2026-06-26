@@ -87,7 +87,30 @@ on:
         required: false
         type: string
         default: ""
-        
+
+      secret_titles:
+        description: |
+          JSON array de secretos a recuperar de BeyondTrust Secrets Safe
+          e inyectar como TF_VAR_* en el plan.
+
+          Formato:
+            '[{"title": "client-secret", "tf_var": "entra_client_secret"}]'
+
+          Ejemplo multi-secreto:
+            '[
+              {"title": "client-secret",    "tf_var": "entra_client_secret"},
+              {"title": "htpasswd-password", "tf_var": "htpasswd_password"}
+            ]'
+
+          Requisitos:
+            - BYT_CLIENT_ID_<ENV> y BYT_CLIENT_SECRET_<ENV> disponibles vía secrets: inherit
+            - BT_URL seteado como GitHub Variable (vars.BT_URL)
+            - runner con curl y jq (pre-instalados en la imagen del runner)
+            - El Application User del env tiene acceso al secreto en su vault
+        required: false
+        type: string
+        default: ""
+
       create_pr:
         description: "Whether CI should auto-create a Pull Request."
         required: false
@@ -384,6 +407,139 @@ jobs:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
 
+      - name: Retrieve secrets from BeyondTrust Secrets Safe
+        if: inputs.secret_titles != ''
+        env:
+          _BT_URL: ${{ vars.BT_URL }}
+          # Credenciales per-env — indirect expansion selecciona la correcta en runtime.
+          # DR usa PROD (mismo vault). Unused secrets llegan vacíos — inofensivo.
+          _BYT_CLIENT_ID_DEV:         ${{ secrets.BYT_CLIENT_ID_DEV }}
+          _BYT_CLIENT_SECRET_DEV:     ${{ secrets.BYT_CLIENT_SECRET_DEV }}
+          _BYT_CLIENT_ID_QA:          ${{ secrets.BYT_CLIENT_ID_QA }}
+          _BYT_CLIENT_SECRET_QA:      ${{ secrets.BYT_CLIENT_SECRET_QA }}
+          _BYT_CLIENT_ID_PREPROD:     ${{ secrets.BYT_CLIENT_ID_PREPROD }}
+          _BYT_CLIENT_SECRET_PREPROD: ${{ secrets.BYT_CLIENT_SECRET_PREPROD }}
+          _BYT_CLIENT_ID_PROD:        ${{ secrets.BYT_CLIENT_ID_PROD }}
+          _BYT_CLIENT_SECRET_PROD:    ${{ secrets.BYT_CLIENT_SECRET_PROD }}
+          _SECRET_TITLES: ${{ inputs.secret_titles }}
+        run: |
+          echo "── Retrieving secrets from BeyondTrust Secrets Safe ──"
+
+          # ── Seleccionar credenciales del ambiente via indirect expansion ──
+          ENV="${{ inputs.environment }}"
+          case "$ENV" in
+            dr)      ENV_KEY="PROD" ;;
+            dev)     ENV_KEY="DEV" ;;
+            qa)      ENV_KEY="QA" ;;
+            preprod) ENV_KEY="PREPROD" ;;
+            prod)    ENV_KEY="PROD" ;;
+            *)
+              echo "::error::Ambiente desconocido '${ENV}'."
+              exit 1
+              ;;
+          esac
+
+          BT_CLIENT_ID="${!_BYT_CLIENT_ID_${ENV_KEY}}"
+          BT_CLIENT_SECRET="${!_BYT_CLIENT_SECRET_${ENV_KEY}}"
+
+          # Corrección: indirect expansion con nombres de variables válidos en bash
+          ID_VAR="_BYT_CLIENT_ID_${ENV_KEY}"
+          SECRET_VAR="_BYT_CLIENT_SECRET_${ENV_KEY}"
+          BT_CLIENT_ID="${!ID_VAR}"
+          BT_CLIENT_SECRET="${!SECRET_VAR}"
+
+          if [ -z "$BT_CLIENT_ID" ] || [ -z "$BT_CLIENT_SECRET" ]; then
+            echo "::error::Credenciales BeyondTrust no encontradas para env '${ENV}' (key: ${ENV_KEY})."
+            echo "::error::Verifica que existen los secrets: BYT_CLIENT_ID_${ENV_KEY} y BYT_CLIENT_SECRET_${ENV_KEY}"
+            exit 1
+          fi
+
+          if [ -z "$_BT_URL" ]; then
+            echo "::error::BT_URL no está seteado."
+            echo "::error::Créalo en: Settings → Secrets and variables → Actions → Variables → BT_URL"
+            exit 1
+          fi
+
+          # ── Paso 1: OAuth token ───────────────────────────────────────────
+          echo "Autenticando con BeyondTrust (env=${ENV}, vault key=${ENV_KEY})..."
+          TOKEN=$(curl -s -f -X POST "${_BT_URL}/auth/connect/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials&client_id=${BT_CLIENT_ID}&client_secret=${BT_CLIENT_SECRET}" \
+            | jq -r '.access_token // empty')
+
+          if [ -z "$TOKEN" ]; then
+            echo "::error::BeyondTrust no devolvió access_token. Verifica BYT_CLIENT_ID_${ENV_KEY} y BYT_CLIENT_SECRET_${ENV_KEY}."
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+
+          # ── Paso 2: SignAppin — crear sesión con cookie ───────────────────
+          BT_COOKIE=$(mktemp /tmp/bt_session_XXXXXX.txt)
+          SIGNIN_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            -c "$BT_COOKIE" \
+            -X POST "${_BT_URL}/Auth/SignAppin" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "")
+
+          if [ "$SIGNIN_HTTP" != "200" ]; then
+            echo "::error::BeyondTrust SignAppin falló (HTTP ${SIGNIN_HTTP})."
+            rm -f "$BT_COOKIE"
+            exit 1
+          fi
+          echo "✅ Sesión BeyondTrust establecida."
+
+          # ── Paso 3: Listar todos los secretos del vault (scoped al Application User) ──
+          ALL_SECRETS=$(curl -s -f -b "$BT_COOKIE" \
+            -H "Authorization: Bearer $TOKEN" \
+            "${_BT_URL}/secrets-safe/secrets")
+
+          # ── Paso 4: Por cada entry en secret_titles → buscar ID → fetch valor ──
+          COUNT=0
+          echo "$_SECRET_TITLES" | jq -c '.[]' | while IFS= read -r entry; do
+            TITLE=$(echo "$entry"  | jq -r '.title')
+            TF_VAR=$(echo "$entry" | jq -r '.tf_var')
+
+            # Resolver ID filtrando por Title en el listado
+            SECRET_ID=$(echo "$ALL_SECRETS" | jq -r \
+              --arg t "$TITLE" '.[] | select(.Title == $t) | .Id' | head -1)
+
+            if [ -z "$SECRET_ID" ]; then
+              echo "::error::Secreto con Title '${TITLE}' no encontrado en el vault de env '${ENV}'."
+              echo "::error::Verifica que el secreto existe y el Application User BYT_CLIENT_ID_${ENV_KEY} tiene acceso."
+              curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
+                -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
+              rm -f "$BT_COOKIE"
+              exit 1
+            fi
+
+            # Fetch valor real por ID (el listado no incluye el valor por seguridad)
+            SECRET_VALUE=$(curl -s -f -b "$BT_COOKIE" \
+              -H "Authorization: Bearer $TOKEN" \
+              "${_BT_URL}/secrets-safe/secrets/${SECRET_ID}" \
+              | jq -r '.Password // empty')
+
+            if [ -z "$SECRET_VALUE" ]; then
+              echo "::error::Secreto '${TITLE}' (id: ${SECRET_ID}) devolvió valor vacío."
+              curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
+                -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
+              rm -f "$BT_COOKIE"
+              exit 1
+            fi
+
+            # Maskear y exportar como TF_VAR_*
+            echo "::add-mask::$SECRET_VALUE"
+            printf 'TF_VAR_%s=%s\n' "$TF_VAR" "$SECRET_VALUE" >> $GITHUB_ENV
+            echo "✅ TF_VAR_${TF_VAR} inyectado (title: ${TITLE})"
+            COUNT=$((COUNT + 1))
+          done
+
+          # ── Signout + cleanup ─────────────────────────────────────────────
+          curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
+            -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
+          rm -f "$BT_COOKIE"
+          echo "── Sesión BeyondTrust cerrada. ──"
+          
       - name: Terragrunt validate
         working-directory: ${{ inputs.working_directory }}
         run: terragrunt validate
@@ -675,7 +831,7 @@ jobs:
           ou_name: ${{ inputs.ou_name }}
           working_directory: ${{ inputs.working_directory }}
           extra_vars: ${{ inputs.extra_vars }}
-          secret_var_names: ${{ inputs.secret_var_names }}
+          secret_var_names: ${SECRET_VAR_NAMES} 
           plan_artifact_name: ${{ needs.plan.outputs.artifact_name }}
           plan_exitcode: ${EXITCODE}
           next_environment: ${NEXT_ENV}
@@ -695,6 +851,12 @@ jobs:
           cost_diff: ${COST_DIFF}
           -->"
 
+          SECRET_VAR_NAMES=""
+          if [ -n '${{ inputs.secret_titles }}' ]; then
+            SECRET_VAR_NAMES=$(echo '${{ inputs.secret_titles }}' \
+              | jq -r '[.[].tf_var] | join(" ")' 2>/dev/null || echo "")
+          fi
+          
           # Check if PR already exists
           EXISTING_PR=$(gh pr list \
             --head "$SOURCE" \
