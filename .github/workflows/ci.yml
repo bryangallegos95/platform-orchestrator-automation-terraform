@@ -53,6 +53,26 @@ on:
         required: false
         type: string
         default: ""
+        
+      secret_var_names:
+        description: |
+          Space-separated Terraform variable NAMES whose values are sensitive.
+          Values must NOT be passed here — they come from the environment-level
+          GitHub Secret TERRAFORM_SENSITIVE_VARS (passed via secrets: inherit).
+
+          Example: "entra_client_secret htpasswd_password"
+
+          These names (not values) are embedded in DEPLOYMENT_CONTEXT for audit
+          traceability. The actual injection happens in the plan job via TF_VAR_*
+          env vars, masked with ::add-mask:: before the plan runs.
+
+          Contrast with extra_vars (non-sensitive -var flags visible in PR body):
+            extra_vars     → "tgw_id=tgw-0abc1234"     (non-sensitive, in PR table)
+            secret_var_names → "entra_client_secret"   (names only, values in secret)
+        required: false
+        type: string
+        default: ""
+        
       create_pr:
         description: "Whether CI should auto-create a Pull Request."
         required: false
@@ -245,6 +265,64 @@ jobs:
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
+
+      - name: Inject sensitive Terraform variables
+        # Runs only when the caller declared sensitive var names.
+        # Reads TERRAFORM_SENSITIVE_VARS (env-level GitHub Secret, passed via
+        # secrets: inherit). Parses KEY=VALUE lines and exports each as TF_VAR_KEY.
+        # ::add-mask:: ensures values are redacted from all subsequent log output,
+        # including the plan step. Terraform additionally marks them (sensitive).
+        if: inputs.secret_var_names != ''
+        env:
+          # TERRAFORM_SENSITIVE_VARS is an environment-level GitHub Secret.
+          # Format: one KEY=VALUE pair per line. Example:
+          #   entra_client_secret=abc123-secret-value
+          #   htpasswd_password=MyS3cur3P@ssw0rd!
+          # Values are automatically masked in logs because the env var
+          # comes from a GitHub Secret.
+          _TF_SENSITIVE_VARS: ${{ secrets.TERRAFORM_SENSITIVE_VARS }}
+        run: |
+          echo "── Injecting sensitive TF vars for: ${{ inputs.secret_var_names }} ──"
+
+          if [ -z "$_TF_SENSITIVE_VARS" ]; then
+            echo "::error::secret_var_names is set to '${{ inputs.secret_var_names }}'"
+            echo "::error::but the TERRAFORM_SENSITIVE_VARS environment secret is empty or missing."
+            echo "::error::Create an environment-level secret named TERRAFORM_SENSITIVE_VARS"
+            echo "::error::with one KEY=VALUE pair per line for each declared variable name."
+            exit 1
+          fi
+
+          COUNT=0
+          while IFS= read -r line; do
+            # Skip blank lines and comment lines
+            [[ -z "$line" || "$line" == \#* ]] && continue
+
+            VAR_NAME="${line%%=*}"
+            VAR_VALUE="${line#*=}"
+
+            if [ -z "$VAR_NAME" ] || [ "$VAR_NAME" = "$line" ]; then
+              echo "::warning::Skipping malformed line (no '=' separator): masked"
+              continue
+            fi
+
+            # Mask the value in all subsequent steps and log output
+            echo "::add-mask::$VAR_VALUE"
+
+            # Inject as TF_VAR_<name> — Terraform picks these up automatically
+            printf 'TF_VAR_%s=%s\n' "$VAR_NAME" "$VAR_VALUE" >> $GITHUB_ENV
+
+            COUNT=$((COUNT + 1))
+          done <<< "$_TF_SENSITIVE_VARS"
+
+          echo "✅ Injected ${COUNT} sensitive TF variable(s)."
+
+          # Cross-check: warn if a declared name has no corresponding value
+          for DECLARED_NAME in ${{ inputs.secret_var_names }}; do
+            if ! grep -q "^${DECLARED_NAME}=" <<< "$_TF_SENSITIVE_VARS"; then
+              echo "::warning::Declared sensitive var '${DECLARED_NAME}' not found in TERRAFORM_SENSITIVE_VARS."
+              echo "::warning::Terraform will error if the variable is required and has no default."
+            fi
+          done
 
       - name: Run TFLint
         working-directory: ${{ inputs.working_directory }}
@@ -582,6 +660,7 @@ jobs:
           ou_name: ${{ inputs.ou_name }}
           working_directory: ${{ inputs.working_directory }}
           extra_vars: ${{ inputs.extra_vars }}
+          secret_var_names: ${{ inputs.secret_var_names }}
           plan_artifact_name: ${{ needs.plan.outputs.artifact_name }}
           plan_exitcode: ${EXITCODE}
           next_environment: ${NEXT_ENV}
