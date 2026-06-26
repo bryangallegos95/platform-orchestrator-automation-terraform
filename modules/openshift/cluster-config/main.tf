@@ -64,7 +64,7 @@ resource "rhcs_identity_provider" "htpasswd" {
 #   groups             → groups (requiere "groups" claim en App Registration)
 resource "rhcs_identity_provider" "entra_id" {
   cluster = var.cluster_id
-  name    = "EntraID"
+  name    = "OpenID"
 
   openid = {
     client_id     = var.entra_client_id
