@@ -21,6 +21,21 @@
 #   prod     → [self-hosted, terraform, prod]     → us-east-1
 #   dr       → [self-hosted, terraform, dr]       → us-east-2
 
+#----------- Integración BeyondTrust--------------------------------------------
+# FLUJO VALIDADO (4 pasos):
+#   1. POST /auth/connect/token          → OAuth access_token
+#   2. POST /Auth/SignAppin (con cookie) → sesión activa
+#   3. GET  /secrets-safe/secrets        → lista todos los secretos del vault
+#              filtrar por .Title        → obtener .Id
+#   4. GET  /secrets-safe/secrets/{Id}   → valor real en .Password
+#      POST /Auth/Signout                → cerrar sesión
+#
+# AISLAMIENTO POR VAULT:
+#   Cada Application User (BYT_CLIENT_ID_DEV, _QA, _PREPROD, _PROD) solo tiene
+#   acceso a su vault (VaultDev, VaultQA, VaultPreprod, VaultProd).
+#   El listado /secrets-safe/secrets ya está scoped al vault correcto — no hay
+#   que pasar el vault ni el folder path. Solo el Title del secreto.
+
 name: "[reusable] Terraform CI"
 
 on:
