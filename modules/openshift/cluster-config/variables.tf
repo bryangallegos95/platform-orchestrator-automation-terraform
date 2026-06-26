@@ -1,101 +1,119 @@
 # modules/openshift/cluster-config/variables.tf
+#
+# Todas las variables sensibles llegan vía TF_VAR_* inyectados por ci.yml
+# desde BeyondTrust Secrets Safe. NUNCA se hardcodean en terragrunt.hcl.
 
 # ── Cluster identity ──────────────────────────────────────────────────────────
 variable "cluster_id" {
-  description = "ROSA HCP cluster ID (output of the rosa-hcp module). Used to bind IDPs to the cluster via OCM."
-  type        = string
+  description = <<-EOT
+    ROSA HCP cluster ID (output del módulo rosa-hcp).
+    Usado para vincular los IDPs al cluster vía OCM.
+    Obtener con: terragrunt output -raw cluster_id (unidad rosa-hcp).
+  EOT
+  type = string
 
   validation {
     condition     = length(trimspace(var.cluster_id)) > 0
-    error_message = "cluster_id must not be empty. Get it from: terragrunt output -raw cluster_id (rosa-hcp unit)."
+    error_message = "cluster_id no debe estar vacío."
   }
 }
 
 variable "cluster_name" {
-  description = "Cluster name (e.g. int-dev). Used only for tagging/documentation context."
+  description = "Nombre del cluster (ej. int-dev). Solo para documentación/tagging."
   type        = string
 }
 
-# ── htpasswd IDP (non-prod gate) ─────────────────────────────────────────────
+# ── htpasswd IDP (gate non-prod) ──────────────────────────────────────────────
 variable "enable_htpasswd" {
   description = <<-EOT
-    Enable the htpasswd local IDP. MUST be false on prod and dr.
-    Used exclusively for Day-2 bootstrapping (oc login) on non-prod clusters.
-    Set to true  → dev, qa, preprod.
-    Set to false → prod, dr  (enforced by terragrunt invocation; no default here).
+    Habilita el IDP htpasswd local. DEBE ser false en prod y dr.
+    Uso exclusivo: bootstrap Day-2 (oc login admin/changeme en no-prod).
+      true  → dev, qa, preprod
+      false → prod, dr  (enforced por el terragrunt.hcl de cada ambiente)
   EOT
-  type        = bool
+  type = bool
 
   validation {
     condition     = var.enable_htpasswd == true || var.enable_htpasswd == false
-    error_message = "enable_htpasswd must be an explicit boolean (true or false). Never omit it."
+    error_message = "enable_htpasswd debe ser un booleano explícito (true o false)."
   }
 }
 
 variable "htpasswd_username" {
-  description = "Username for the htpasswd local admin (default: admin). Only used when enable_htpasswd = true."
+  description = "Username del admin local htpasswd. Solo cuando enable_htpasswd = true."
   type        = string
   default     = "admin"
 }
 
 variable "htpasswd_password" {
   description = <<-EOT
-    Password for the htpasswd local admin. Passed via TF_VAR_htpasswd_password
-    (GitHub Secret) — never hardcoded in terragrunt.hcl.
-    Only used when enable_htpasswd = true.
-    Minimum: 14 chars, must contain upper, lower, digit, special char (ROSA policy).
+    Password del admin local htpasswd.
+    Origen: BeyondTrust Secrets Safe (title: htpasswd-password)
+            → inyectado por ci.yml como TF_VAR_htpasswd_password
+            → nunca hardcodeado en terragrunt.hcl
+    Solo se usa cuando enable_htpasswd = true.
+    Mínimo 14 chars (política ROSA).
   EOT
   type      = string
   sensitive = true
-  default   = null   # null-safe: resource has count=0 when enable_htpasswd=false
+  default   = null   # null-safe: el recurso tiene count=0 cuando enable_htpasswd=false
 
   validation {
     condition     = var.enable_htpasswd == false || (var.htpasswd_password != null && length(var.htpasswd_password) >= 14)
-    error_message = "htpasswd_password is required when enable_htpasswd = true and must be >= 14 characters."
+    error_message = "htpasswd_password es requerido cuando enable_htpasswd = true y debe tener >= 14 caracteres."
   }
 }
 
 # ── EntraID openid IDP ────────────────────────────────────────────────────────
 variable "entra_client_id" {
   description = <<-EOT
-    Azure AD App Registration client ID. Non-sensitive — identifies the app,
-    does not grant access alone. Passed via TF_VAR_entra_client_id (GitHub Secret)
-    to avoid committing to Git even though it is not confidential.
+    Application (client) ID del App Registration de Azure AD.
+    Técnicamente no-sensible (solo identifica la app, no autentica por sí solo).
+    Origen: BeyondTrust Secrets Safe (title: app_id)
+            → recuperado en prepare step del orquestador
+            → pasado via extra_vars como TF_VAR_entra_client_id
+    Aparece en el PR body table (aceptable — es un identificador público).
   EOT
   type = string
 
   validation {
     condition     = length(trimspace(var.entra_client_id)) > 0
-    error_message = "entra_client_id must not be empty."
+    error_message = "entra_client_id no debe estar vacío."
   }
 }
 
 variable "entra_client_secret" {
   description = <<-EOT
-    Azure AD App Registration client secret. SENSITIVE — persisted in Terraform
-    state encrypted with the cluster KMS key (accepted by Seguridad).
-    Passed via TF_VAR_entra_client_secret (GitHub Secret).
-    Never set a default; never commit a value.
+    Client secret del App Registration de Azure AD. SENSIBLE.
+    Persiste en Terraform state cifrado con AES-256 en S3 (aceptado por Seguridad).
+    Origen: BeyondTrust Secrets Safe (title: client-secret)
+            → inyectado por ci.yml como TF_VAR_entra_client_secret (masked)
+            → nunca aparece en PR body, logs, ni plan output en texto plano
+    Nunca setear un default. Nunca commitear un valor.
   EOT
   type      = string
   sensitive = true
 
   validation {
     condition     = length(trimspace(var.entra_client_secret)) > 0
-    error_message = "entra_client_secret must not be empty."
+    error_message = "entra_client_secret no debe estar vacío."
   }
 }
 
 variable "entra_tenant_id" {
   description = <<-EOT
-    Azure AD tenant ID. Used to construct the issuer URL:
-    https://login.microsoftonline.com/<tenant_id>/v2.0
-    Passed via TF_VAR_entra_tenant_id (GitHub Secret).
+    Tenant UUID de Azure AD.
+    Usado para construir el issuer URL:
+      https://login.microsoftonline.com/<tenant_id>/v2.0
+    Técnicamente no-sensible (es público en Azure).
+    Origen: BeyondTrust Secrets Safe (title: tenant-id)
+            → recuperado en prepare step del orquestador
+            → pasado via extra_vars como TF_VAR_entra_tenant_id
   EOT
   type = string
 
   validation {
     condition     = can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", var.entra_tenant_id))
-    error_message = "entra_tenant_id must be a valid UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."
+    error_message = "entra_tenant_id debe ser un UUID válido (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)."
   }
 }
