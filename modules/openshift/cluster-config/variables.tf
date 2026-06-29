@@ -8,7 +8,7 @@ variable "cluster_id" {
 }
 
 variable "cluster_name" {
-  description = "Canonical cluster name (int-dev, int-qa, neg-dev, etc.). Used for logging only."
+  description = "Canonical cluster name (int-dev, int-qa, neg-dev, etc.). Used for logging + validation only."
   type        = string
 }
 
@@ -20,7 +20,7 @@ variable "enable_htpasswd" {
   default     = false
 
   validation {
-    condition     = !(var.enable_htpasswd && can(regex("^(prod|dr)$", var.cluster_name)))
+    condition     = !(var.enable_htpasswd && can(regex("(prod|dr)$", var.cluster_name)))
     error_message = "enable_htpasswd MUST be false for prod and dr clusters. Regulatory requirement (SB-2023-01901)."
   }
 }
@@ -56,41 +56,8 @@ variable "entra_tenant_id" {
   type        = string
 }
 
-# ── Custom Ingress (Day-1 iter.2) ─────────────────────────────────────────────
-
-variable "enable_custom_ingress" {
-  description = <<-EOT
-    Enable rhcs_default_ingress custom hostname + TLS cert configuration.
-    MUST be false until Day-2 Step B has created the TLS secret 'custom-apps-cert'
-    in the openshift-ingress namespace. Set to true for Day-1 iter.2 run.
-  EOT
-  type    = bool
-  default = false
-}
-
-variable "custom_routes_hostname" {
-  description = <<-EOT
-    Custom apps hostname for the ROSA default IngressController.
-    Format: apps.<env>.aws.bancointernacional.ec (WITHOUT wildcard asterisk).
-    Example: apps.dev.aws.bancointernacional.ec
-    Only used when enable_custom_ingress = true.
-  EOT
-  type    = string
-  default = ""
-
-  validation {
-    condition     = !var.enable_custom_ingress || length(var.custom_routes_hostname) > 0
-    error_message = "custom_routes_hostname is required when enable_custom_ingress = true."
-  }
-}
-
-variable "custom_routes_tls_secret_ref" {
-  description = <<-EOT
-    Name of the TLS secret in openshift-ingress namespace that contains the bank's
-    wildcard certificate. Created by Day-2 Step B (fetched from BeyondTrust titles: cert / key).
-    Must exist BEFORE applying with enable_custom_ingress = true.
-    Standard name: custom-apps-cert (consistent across all environments).
-  EOT
-  type    = string
-  default = "custom-apps-cert"
-}
+# ── Custom Ingress: REMOVED ───────────────────────────────────────────────────
+# The variables enable_custom_ingress / custom_routes_hostname /
+# custom_routes_tls_secret_ref were removed. The bank-domain ingress is now a
+# SECONDARY IngressController managed by GitOps (iac-gitops-platform-baseline/
+# base/ingress/), not by this Terraform module. See main.tf header.
