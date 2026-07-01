@@ -469,6 +469,8 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
+          TF_CLI_ARGS: "-no-color"
+          TERRAGRUNT_NO_COLOR: "true"
         run: |
           # Build -var flags from extra_vars input
           EXTRA_VAR_FLAGS=""
