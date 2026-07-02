@@ -14,8 +14,10 @@
 │  └── cd.yml    ← Reusable CD: apply → rollback → promotion issue   │
 │                                                                     │
 │  modules/                                                           │
-│  └── networking/                                                    │
-│      └── vpc/  ← Spoke VPC module (Hub-and-Spoke topology)          │
+│  ├── networking/                                                    │
+│  │   └── vpc/  ← Spoke VPC module (Hub-and-Spoke topology)          │
+│  └── compute/                                                       │
+│      └── ec2/  ← EC2 instance module (deploys into a Spoke VPC)     │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
          ▲                           ▲
@@ -138,6 +140,48 @@ terraform {
 
 ---
 
+### `modules/compute/ec2`
+
+Single EC2 instance deployed into an existing Spoke VPC. One module call = one instance (use `workload` to distinguish them: `bastion`, `sftp`, `app01`…).
+
+**Creates:**
+- EC2 instance in a discovered private subnet (`subnet_tier` = app/bdd/gwlb, `subnet_az` = a/b)
+- Dedicated Security Group (no inbound by default — access via SSM Session Manager)
+- IAM role + instance profile with `AmazonSSMManagedInstanceCore`
+
+**Discovery (no IDs passed in, no shared state):**
+- VPC by Name convention: `vpc-aw-{region}-{service}-{ambiente}`
+- Subnet by the `Tier` / `AZ` tags stamped by the VPC module
+
+**Hardening baked in:**
+- IMDSv2 required by default, root EBS always encrypted (optional CMK via `ebs_kms_key_arn`)
+- No public IP, EBS-optimized, termination protection auto-enabled in preprod/prod/dr
+- AMI resolved from SSM parameter (latest AL2023 by default) and pinned at creation — upgrades are deliberate via `ami_id`
+
+**Required variables:**
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `service` | string | Must match the Spoke VPC's `service` (drives discovery) |
+| `workload` | string | Name suffix of this instance (e.g. `bastion`) |
+| `ambiente` | string | `dev`, `qa`, `preprod`, `prod`, `dr` |
+| `aws_account_id` | string | Target account — guardrail against wrong-account applies |
+| `aplicacion` | string | Mandatory tag |
+| `propietario_recurso` | string | Mandatory tag |
+| `producto` | string | Mandatory tag |
+| `centro_costo` | string | Mandatory tag |
+
+**Key optional variables:** `instance_type` (default `t3.medium`), `subnet_tier`/`subnet_az`, `ami_id`, `root_volume_size`, `ebs_kms_key_arn`, `ingress_rules`, `additional_iam_policy_arns`, `user_data`, `extra_tags`.
+
+**Usage (from son repo's `terragrunt.hcl`):**
+```hcl
+terraform {
+  source = "git::https://github.com/bin-transversales-devops/platform-orchestrator-automation-terraform//modules/compute/ec2?ref=v1.13.0"
+}
+```
+
+---
+
 ## Environment → Region → Bucket Mapping
 
 | Environment | Region | Runner Tag | State Bucket |
@@ -220,6 +264,16 @@ Son repos pin to a specific version: `?ref=v1.0.0`
 │       ├── ci.yml          # Reusable CI workflow
 │       └── cd.yml          # Reusable CD workflow
 └── modules/
+    ├── compute/
+    │   └── ec2/
+    │       ├── main.tf             # EC2 instance (IMDSv2, encrypted root volume)
+    │       ├── data.tf             # VPC/subnet discovery by tags + account guard
+    │       ├── security_groups.tf  # Dedicated SG (no inbound by default)
+    │       ├── iam.tf              # Instance role + profile (SSM core)
+    │       ├── variables.tf        # All inputs with validations
+    │       ├── outputs.tf          # Instance ID, private IP, SG ID, role ARN
+    │       ├── locals.tf           # Naming conventions, tags
+    │       └── versions.tf         # Provider constraints
     └── networking/
         └── vpc/
             ├── main.tf         # VPC, subnets, TGW attachment, routes
