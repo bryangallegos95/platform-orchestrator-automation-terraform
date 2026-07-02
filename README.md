@@ -42,7 +42,7 @@ Called by son repos to validate infrastructure changes.
 | ② Lint | `tflint` with pre-installed AWS plugin |
 | ③ Plan | `terragrunt validate` + `plan` with `-detailed-exitcode` |
 | ④ Cost | `infracost breakdown` (only if changes detected) |
-| ⑤ Create PR | Auto-creates PR with plan output + `DEPLOYMENT_CONTEXT` metadata |
+| ⑤ Create PR | Auto-creates PR with plan output + `DEPLOYMENT_CONTEXT` metadata, then posts the Infracost report as a PR comment (includes FinOps guardrails/tagging policies when Infracost Cloud is enabled) |
 
 **Key inputs:**
 
