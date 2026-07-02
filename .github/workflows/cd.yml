@@ -223,26 +223,31 @@ jobs:
           echo "::notice::Plan exitcode=0. No infrastructure changes — apply skipped."
           echo "### ① Apply: ⏭️ Skipped (no changes)" >> $GITHUB_STEP_SUMMARY
 
-      # ── Change window (prod only) ──────────────────────────────
+# ── Change window (prod only) ──────────────────────────────
       - name: Change window check
         if: inputs.plan_exitcode != '0' && inputs.environment == 'prod'
         run: |
-          HOUR=$(date -u +%H)
+          # Ecuador está en UTC-5 todo el año (sin horario de verano)
+          HOUR_UTC=$(date -u +%H)
+          MIN_UTC=$(date -u +%M)
           DAY=$(date -u +%u)
-          START=${{ inputs.change_window_start_utc }}
-          END=${{ inputs.change_window_end_utc }}
+
+          NOW_MIN=$((10#$HOUR_UTC * 60 + 10#$MIN_UTC))
+
+          # Horario laboral Ecuador: 08:30–17:30 → UTC: 13:30–22:30
+          BLOCK_START=$((13 * 60 + 30))   # 13:30 UTC
+          BLOCK_END=$((22 * 60 + 30))     # 22:30 UTC
 
           if [[ $DAY -ge 6 ]]; then
-            echo "::error::❌ Weekend deployments to prod are not allowed (day=$DAY)."
-            echo "::error::Retry on Monday–Friday."
+            echo "::notice::✅ Fin de semana, fuera de horario laboral (day=$DAY). Deploy permitido."
+          elif [[ $NOW_MIN -ge $BLOCK_START && $NOW_MIN -lt $BLOCK_END ]]; then
+            echo "::error::❌ No se permiten deploys a prod en horario laboral de Ecuador."
+            echo "::error::Bloqueado: 08:30–17:30 Ecuador (13:30–22:30 UTC), hora actual: ${HOUR_UTC}:${MIN_UTC} UTC."
+            echo "::error::Reintenta fuera de ese horario."
             exit 1
+          else
+            echo "✅ Fuera de horario laboral (${HOUR_UTC}:${MIN_UTC} UTC). Deploy permitido."
           fi
-          if [[ $HOUR -lt $START || $HOUR -ge $END ]]; then
-            echo "::error::❌ Outside change window (current: ${HOUR}:xx UTC)."
-            echo "::error::Allowed: ${START}:00–${END}:00 UTC, Mon–Fri."
-            exit 1
-          fi
-          echo "✅ Within change window (${HOUR}:xx UTC, day=$DAY)."
 
       # ── Checkout ────────────────────────────────────────────────
       - name: Checkout
