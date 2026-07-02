@@ -711,8 +711,8 @@ jobs:
           # Determine approval teams for next transition
           case "$ENV" in
             dev)     NEXT_APPROVAL_TEAMS="Desarrollo,cloud-ops" ;;
-            qa)      NEXT_APPROVAL_TEAMS="CloudOps,Seguridad" ;;
-            preprod) NEXT_APPROVAL_TEAMS="CloudOps,Infraestructura" ;;
+            qa)      NEXT_APPROVAL_TEAMS="cloud-ops,Seguridad" ;;
+            preprod) NEXT_APPROVAL_TEAMS="cloud-ops,Infraestructura" ;;
             prod)    NEXT_APPROVAL_TEAMS="" ;;
             *)       NEXT_APPROVAL_TEAMS="" ;;
           esac
