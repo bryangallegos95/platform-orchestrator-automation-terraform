@@ -15,12 +15,12 @@ variable "cluster_name" {
 }
 
 variable "dominio" {
-  description = "Platform domain — integracion | contenerizacion. Used for subnet discovery and naming."
+  description = "Platform domain — integracion | negocio. Used for subnet discovery and naming."
   type        = string
 
   validation {
-    condition     = contains(["integracion", "contenerizacion"], var.dominio)
-    error_message = "dominio must be 'integracion' or 'contenerizacion'."
+    condition     = contains(["integracion", "negocio"], var.dominio)
+    error_message = "dominio must be 'integracion' or 'negocio'."
   }
 }
 
@@ -63,7 +63,7 @@ variable "ebs_kms_key_arn" {
     roles can use it (required when EbsEncryptionByDefault uses a CMK).
 
     - integracion: pass the SHARED key ARN (same for all integracion clusters).
-    - contenerizacion:     pass the cluster's INDIVIDUAL key ARN.
+    - negocio:     pass the cluster's INDIVIDUAL key ARN.
     - "" (empty)   => no grants (only when EBS uses the AWS-managed aws/ebs key).
   EOT
   type    = string
