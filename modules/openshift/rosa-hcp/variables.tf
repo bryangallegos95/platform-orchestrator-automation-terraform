@@ -96,6 +96,22 @@ variable "rosa_subnet_discovery_tag" {
   default     = "bancointernacional.ec/rosa"
 }
 
+variable "vpc_discovery_dominio" {
+  description = <<-EOT
+    Dominio used ONLY for network discovery (VPC Name + subnet dominio-tag filters)
+    when the VPC naming service differs from the cluster's dominio — e.g. negocio
+    clusters hosted on VPCs named vpc-aw-ue1-contenerizacion-<env>. The cluster
+    itself keeps var.dominio in its tags. Null (default) = use var.dominio.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.vpc_discovery_dominio == null || can(regex("^[a-z][a-z0-9-]*[a-z0-9]$", var.vpc_discovery_dominio))
+    error_message = "vpc_discovery_dominio must be lowercase alphanumeric/hyphen."
+  }
+}
+
 # ── Machine Pools (HA via pool-per-AZ; autoscaling always on) ─────────────────
 variable "machine_pools" {
   description = <<-EOT

@@ -3,7 +3,9 @@
 # Subnet discovery (Option 3) — finds the VPC + private app subnets by the tag
 # contract the VPC module stamps. NO subnet IDs passed in; NO shared state.
 #
-# Discovery triplet: rosa=true + env=<ambiente> + dominio=<dominio>.
+# Discovery triplet: rosa=true + env=<ambiente> + dominio=<discovery_dominio>
+# (defaults to var.dominio; override via vpc_discovery_dominio when the VPC
+# naming service differs from the cluster dominio).
 # AZ resolution uses the VPC module's per-subnet AZ tag (AZ=a / AZ=b).
 
 data "aws_caller_identity" "current" {}
@@ -31,7 +33,7 @@ data "aws_subnets" "rosa" {
   }
   filter {
     name   = "tag:bancointernacional.ec/dominio"
-    values = [var.dominio]
+    values = [local.discovery_dominio]
   }
 }
 
@@ -55,7 +57,7 @@ data "aws_subnet" "rosa_a" {
   }
   filter {
     name   = "tag:bancointernacional.ec/dominio"
-    values = [var.dominio]
+    values = [local.discovery_dominio]
   }
 }
 
@@ -79,7 +81,7 @@ data "aws_subnet" "rosa_b" {
   }
   filter {
     name   = "tag:bancointernacional.ec/dominio"
-    values = [var.dominio]
+    values = [local.discovery_dominio]
   }
 }
 

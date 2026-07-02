@@ -7,7 +7,11 @@
 locals {
   region_short = var.aws_region == "us-east-2" ? "ue2" : "ue1"
 
-  vpc_name_to_discover = "vpc-aw-${local.region_short}-${var.dominio}-${var.ambiente}"
+  # Discovery may use a different dominio than the cluster (e.g. negocio clusters
+  # on contenerizacion-named VPCs). Cluster tags always keep var.dominio.
+  discovery_dominio = coalesce(var.vpc_discovery_dominio, var.dominio)
+
+  vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.discovery_dominio}-${var.ambiente}"
 
   # Discovered subnets by AZ letter → subnet id (populated in data.tf).
   subnet_by_az = {
