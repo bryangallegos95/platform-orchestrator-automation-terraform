@@ -8,7 +8,7 @@ variable "cluster_id" {
 }
 
 variable "cluster_name" {
-  description = "Canonical cluster name (int-dev, int-qa, neg-dev, etc.). Used for logging + validation only."
+  description = "Canonical cluster name (int-dev, int-qa, biz-dev, etc.). Used for logging + validation only."
   type        = string
 }
 
