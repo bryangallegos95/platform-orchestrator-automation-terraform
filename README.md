@@ -16,8 +16,10 @@
 │  modules/                                                           │
 │  ├── networking/                                                    │
 │  │   └── vpc/  ← Spoke VPC module (Hub-and-Spoke topology)          │
-│  └── compute/                                                       │
-│      └── ec2/  ← EC2 instance module (deploys into a Spoke VPC)     │
+│  ├── compute/                                                       │
+│  │   └── ec2/  ← EC2 instance module (deploys into a Spoke VPC)     │
+│  └── database/                                                      │
+│      └── aurora-postgresql/ ← Aurora cluster (deploys into a Spoke) │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
          ▲                           ▲
@@ -182,6 +184,67 @@ terraform {
 
 ---
 
+### `modules/database/aurora-postgresql`
+
+Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One module call = one cluster (use `workload` to distinguish them: `core`, `ledger`, `clientes`…).
+
+**Creates:**
+- DB subnet group over the discovered BDD-tier subnets (both AZs)
+- Aurora PostgreSQL cluster + instances (map-driven — son repos add readers or change the class without module changes)
+- Cluster + instance parameter groups (TLS forced, pgaudit, slow-query logging)
+- Dedicated Security Group (no inbound by default — 5432 opt-in per consumer)
+- Enhanced Monitoring IAM role (prod-like envs)
+- Additive KMS grants for consumer workload roles (`aws_kms_grant` — never touches the key policy)
+
+**Discovery (no IDs passed in, no shared state):**
+- VPC by Name convention: `vpc-aw-{region}-{service}-{ambiente}`
+- BDD subnets by the `Tier=bdd` / `AZ` tags stamped by the VPC module
+- RDS CMK by alias (`kms_key_alias`, default `alias/rds`) — the key **already exists** in every account (account baseline); the module never creates keys
+
+**Topology by environment (overridable):**
+
+| Environment | Default topology |
+|-------------|-----------------|
+| dev / qa / preprod | Single-AZ — 1 writer (`multi_az=null` → auto) |
+| prod | Multi-AZ — writer (AZ-a) + reader (AZ-b), auto-failover |
+| dr | Mirror in us-east-2; opt-in Aurora Global Database replication (`enable_global_database` on prod + `global_cluster_identifier` on dr) |
+
+**Hardening baked in (not configurable off):**
+- Storage encryption with the account CMK, IAM database authentication, `rds.force_ssl=1`
+- Not publicly accessible, PostgreSQL logs → CloudWatch, `copy_tags_to_snapshot`
+- Deletion protection + final snapshot + Enhanced Monitoring auto-enabled in preprod/prod/dr
+- Backup retention auto: 35 days prod/dr, 7 days elsewhere (floor: 7)
+
+**Admin service user (day-1/day-2):**
+- `master_username` (default `svcadmin`) is the cluster admin service user
+- Its password lives in **BeyondTrust Secrets Safe** (per-env vault) and is injected at plan time by `ci.yml` via the existing `secret_titles` input → `TF_VAR_master_password`. Never hardcoded, never a default
+- Plan-time guardrail fails if the credential was not injected
+
+**Required variables:**
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `service` | string | Must match the Spoke VPC's `service` (drives discovery) |
+| `workload` | string | Name suffix of this cluster (e.g. `core`) |
+| `ambiente` | string | `dev`, `qa`, `preprod`, `prod`, `dr` |
+| `aws_account_id` | string | Target account — guardrail against wrong-account applies |
+| `master_password` | string | Injected via `TF_VAR_master_password` from BeyondTrust |
+| `aplicacion` | string | Mandatory tag |
+| `propietario_recurso` | string | Mandatory tag |
+| `producto` | string | Mandatory tag |
+| `centro_costo` | string | Mandatory tag |
+
+**Key optional variables:** `engine_version` (default `16.6`), `db_family` (derived from major version), `instance_class` (default `db.r6g.large`), `instances` (explicit topology map), `multi_az`, `allowed_security_group_ids` / `allowed_cidrs` (5432 ingress), `kms_key_alias` / `kms_key_arn`, `kms_consumer_role_arns`, `cluster_parameters` / `instance_parameters` (baseline overrides), `enable_global_database` / `global_cluster_identifier`, `database_name`, `backup_retention_period`, `extra_tags`.
+
+**Usage (from son repo's `terragrunt.hcl`):**
+```hcl
+terraform {
+  source = "git::https://github.com/bin-transversales-devops/platform-orchestrator-automation-terraform//modules/database/aurora-postgresql?ref=v1.14.0"
+}
+```
+
+---
+
 ## Environment → Region → Bucket Mapping
 
 | Environment | Region | Runner Tag | State Bucket |
@@ -274,6 +337,18 @@ Son repos pin to a specific version: `?ref=v1.0.0`
     │       ├── outputs.tf          # Instance ID, private IP, SG ID, role ARN
     │       ├── locals.tf           # Naming conventions, tags
     │       └── versions.tf         # Provider constraints
+    ├── database/
+    │   └── aurora-postgresql/
+    │       ├── main.tf              # Cluster, instances, subnet group, global DB
+    │       ├── data.tf              # VPC/BDD-subnet/KMS discovery + account guard
+    │       ├── parameter_groups.tf  # Cluster/instance PGs (TLS, pgaudit baseline)
+    │       ├── security_groups.tf   # Dedicated SG (no inbound by default)
+    │       ├── iam.tf               # Enhanced Monitoring role
+    │       ├── kms.tf               # Additive grants for consumer roles
+    │       ├── variables.tf         # All inputs with validations
+    │       ├── outputs.tf           # Endpoints, resource ID, SG ID, KMS ARN
+    │       ├── locals.tf            # Naming conventions, topology, tags
+    │       └── versions.tf          # Provider constraints
     └── networking/
         └── vpc/
             ├── main.tf         # VPC, subnets, TGW attachment, routes
