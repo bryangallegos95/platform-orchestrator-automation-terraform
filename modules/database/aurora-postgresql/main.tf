@@ -125,6 +125,7 @@ resource "aws_rds_cluster_instance" "this" {
 
   publicly_accessible        = false
   auto_minor_version_upgrade = true
+  copy_tags_to_snapshot      = true
   ca_cert_identifier         = var.ca_cert_identifier
   apply_immediately          = local.apply_immediately
 
