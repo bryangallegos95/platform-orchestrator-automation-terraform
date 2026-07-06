@@ -8,6 +8,13 @@
 #                    replication via enable_global_database (prod) +
 #                    global_cluster_identifier (dr)
 #
+# Compute model (orthogonal to the topology above):
+#   provisioned (default) : fixed instance_class (e.g. db.r6g.large)
+#   serverless v2         : var.serverless = true — instances become
+#                           db.serverless and scale between min/max ACUs;
+#                           min_acu = 0 adds auto-pause (dev/qa only,
+#                           blocked by precondition in prod-like envs)
+#
 # What this module creates:
 #   1. DB subnet group over the discovered BDD-tier subnets (both AZs)
 #   2. Aurora PostgreSQL cluster encrypted with the account's EXISTING RDS CMK
@@ -63,6 +70,18 @@ resource "aws_rds_cluster" "this" {
     var.additional_security_group_ids
   )
 
+  # ── Serverless v2 scaling (only when var.serverless) ──────────────────────
+  # min_acu = 0 enables auto-pause: compute cost $0 while idle, ~15s resume
+  # on the next connection. Intended for dev/qa — prod should keep min > 0.
+  dynamic "serverlessv2_scaling_configuration" {
+    for_each = var.serverless ? [1] : []
+    content {
+      min_capacity             = var.serverless_min_acu
+      max_capacity             = var.serverless_max_acu
+      seconds_until_auto_pause = var.serverless_min_acu == 0 ? var.serverless_auto_pause_seconds : null
+    }
+  }
+
   # ── Encryption — always on, always the account's existing RDS CMK ─────────
   storage_encrypted = true
   kms_key_id        = local.kms_key_arn
@@ -100,6 +119,19 @@ resource "aws_rds_cluster" "this" {
     precondition {
       condition     = local.is_global_secondary || length(var.master_password) >= 16
       error_message = "master_password is required (>= 16 chars). It must be injected as TF_VAR_master_password from BeyondTrust Secrets Safe via the ci.yml secret_titles input — never hardcoded."
+    }
+
+    # Serverless v2 sanity: the ceiling must be above the floor.
+    precondition {
+      condition     = !var.serverless || var.serverless_max_acu >= var.serverless_min_acu
+      error_message = "serverless_max_acu must be >= serverless_min_acu."
+    }
+
+    # Auto-pause (min_acu = 0) trades cost for a ~15s resume delay on the
+    # first connection — never acceptable in prod-like environments.
+    precondition {
+      condition     = !(var.serverless && var.serverless_min_acu == 0 && local.is_prod_like)
+      error_message = "serverless_min_acu = 0 (auto-pause) is not allowed in preprod/prod/dr — set a floor of at least 0.5 ACU."
     }
   }
 
