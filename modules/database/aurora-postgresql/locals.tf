@@ -44,13 +44,18 @@ locals {
   # single writer everywhere else.
   multi_az = var.multi_az != null ? var.multi_az : contains(["prod", "dr"], var.ambiente)
 
+  # Serverless v2: every instance defaults to db.serverless and the cluster
+  # gets a serverlessv2_scaling_configuration block (see main.tf). Mixed
+  # clusters remain possible via per-instance instance_class overrides.
+  default_instance_class = var.serverless ? "db.serverless" : var.instance_class
+
   # Default instance topology. Son repos override/extend via var.instances
   # (add readers, change class per instance) without touching the module.
   default_instances = local.multi_az ? {
-    "01" = { instance_class = var.instance_class, az = "a", promotion_tier = 0 }
-    "02" = { instance_class = var.instance_class, az = "b", promotion_tier = 1 }
+    "01" = { instance_class = local.default_instance_class, az = "a", promotion_tier = 0 }
+    "02" = { instance_class = local.default_instance_class, az = "b", promotion_tier = 1 }
     } : {
-    "01" = { instance_class = var.instance_class, az = "a", promotion_tier = 0 }
+    "01" = { instance_class = local.default_instance_class, az = "a", promotion_tier = 0 }
   }
 
   # Effective instance map — var.instances (if provided) replaces the default
@@ -58,7 +63,7 @@ locals {
   instances = {
     for k, v in(length(var.instances) > 0 ? var.instances : local.default_instances) :
     k => {
-      instance_class = coalesce(v.instance_class, var.instance_class)
+      instance_class = coalesce(v.instance_class, local.default_instance_class)
       az             = coalesce(v.az, "a")
       promotion_tier = coalesce(v.promotion_tier, 1)
     }

@@ -209,6 +209,14 @@ Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One mo
 | prod | Multi-AZ — writer (AZ-a) + reader (AZ-b), auto-failover |
 | dr | Mirror in us-east-2; opt-in Aurora Global Database replication (`enable_global_database` on prod + `global_cluster_identifier` on dr) |
 
+**Compute model (orthogonal to topology):**
+
+| Model | How | Notes |
+|-------|-----|-------|
+| Provisioned (default) | `instance_class` (default `db.r6g.large`) | Fixed capacity |
+| Serverless v2 | `serverless = true` + `serverless_min_acu` / `serverless_max_acu` | Instances become `db.serverless`; scales in ACUs (1 ACU ≈ 2 GiB) |
+| Serverless v2 + auto-pause | `serverless_min_acu = 0` | Compute cost $0 while idle, ~15s resume. **dev/qa only** — blocked by precondition in preprod/prod/dr. Requires engine 16.3+/15.7+/14.12+/13.15+ |
+
 **Hardening baked in (not configurable off):**
 - Storage encryption with the account CMK, IAM database authentication, `rds.force_ssl=1`
 - Not publicly accessible, PostgreSQL logs → CloudWatch, `copy_tags_to_snapshot`
@@ -234,7 +242,7 @@ Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One mo
 | `producto` | string | Mandatory tag |
 | `centro_costo` | string | Mandatory tag |
 
-**Key optional variables:** `engine_version` (default `16.6`), `db_family` (derived from major version), `instance_class` (default `db.r6g.large`), `instances` (explicit topology map), `multi_az`, `allowed_security_group_ids` / `allowed_cidrs` (5432 ingress), `kms_key_alias` / `kms_key_arn`, `kms_consumer_role_arns`, `cluster_parameters` / `instance_parameters` (baseline overrides), `enable_global_database` / `global_cluster_identifier`, `database_name`, `backup_retention_period`, `extra_tags`.
+**Key optional variables:** `engine_version` (default `16.6`), `db_family` (derived from major version), `instance_class` (default `db.r6g.large`), `serverless` / `serverless_min_acu` / `serverless_max_acu` / `serverless_auto_pause_seconds` (Serverless v2), `instances` (explicit topology map), `multi_az`, `allowed_security_group_ids` / `allowed_cidrs` (5432 ingress), `kms_key_alias` / `kms_key_arn`, `kms_consumer_role_arns`, `cluster_parameters` / `instance_parameters` (baseline overrides), `enable_global_database` / `global_cluster_identifier`, `database_name`, `backup_retention_period`, `extra_tags`.
 
 **Usage (from son repo's `terragrunt.hcl`):**
 ```hcl

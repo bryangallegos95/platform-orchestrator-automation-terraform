@@ -124,13 +124,53 @@ variable "multi_az" {
 }
 
 variable "instance_class" {
-  description = "Default DB instance class for cluster instances (Graviton recommended). Per-instance override via var.instances."
+  description = "Default DB instance class for cluster instances (Graviton recommended). Ignored when serverless=true (db.serverless). Per-instance override via var.instances."
   type        = string
   default     = "db.r6g.large"
 
   validation {
-    condition     = can(regex("^db\\.[a-z0-9]+\\.[a-z0-9]+$", var.instance_class))
-    error_message = "instance_class must be a valid RDS instance class (e.g. db.r6g.large)."
+    condition     = can(regex("^db\\.serverless$|^db\\.[a-z0-9]+\\.[a-z0-9]+$", var.instance_class))
+    error_message = "instance_class must be a valid RDS instance class (e.g. db.r6g.large) or db.serverless."
+  }
+}
+
+# ── Serverless v2 ─────────────────────────────────────────────────────────────
+variable "serverless" {
+  description = "Use Aurora Serverless v2: instances become db.serverless and compute scales between serverless_min_acu/serverless_max_acu. Mixed clusters are possible via per-instance instance_class overrides in var.instances."
+  type        = bool
+  default     = false
+}
+
+variable "serverless_min_acu" {
+  description = "Minimum capacity in ACUs (1 ACU ≈ 2 GiB RAM). 0 enables AUTO-PAUSE: compute cost drops to $0 when idle, with a resume delay (~15s) on the next connection — dev/qa only. Requires engine 16.3+/15.7+/14.12+/13.15+ for min=0."
+  type        = number
+  default     = 0.5
+
+  validation {
+    condition     = var.serverless_min_acu >= 0 && var.serverless_min_acu <= 256 && floor(var.serverless_min_acu * 2) == var.serverless_min_acu * 2
+    error_message = "serverless_min_acu must be between 0 and 256 in 0.5 increments (0 = auto-pause enabled)."
+  }
+}
+
+variable "serverless_max_acu" {
+  description = "Maximum capacity in ACUs — the scaling ceiling (and the cost ceiling: max_acu × \\$0.12/h in us-east-1)."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.serverless_max_acu >= 1 && var.serverless_max_acu <= 256 && floor(var.serverless_max_acu * 2) == var.serverless_max_acu * 2
+    error_message = "serverless_max_acu must be between 1 and 256 in 0.5 increments."
+  }
+}
+
+variable "serverless_auto_pause_seconds" {
+  description = "Idle seconds before auto-pause when serverless_min_acu = 0. null = AWS default (300s). Ignored when serverless_min_acu > 0. Range: 300-86400."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.serverless_auto_pause_seconds == null || try(var.serverless_auto_pause_seconds >= 300 && var.serverless_auto_pause_seconds <= 86400, false)
+    error_message = "serverless_auto_pause_seconds must be null or between 300 and 86400."
   }
 }
 
