@@ -1,4 +1,4 @@
-# Palo Alto VM-Series with GWLB + Auto Scaling Group
+# Palo Alto VM-Series with GWLB + Auto Scaling Group Deployment
 
 Reusable Terraform module that deploys Palo Alto Networks VM-Series Next-Generation
 Firewalls behind an AWS Gateway Load Balancer (GWLB) with Auto Scaling for centralized
