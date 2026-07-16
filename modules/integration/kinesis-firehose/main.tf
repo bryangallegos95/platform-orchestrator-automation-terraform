@@ -57,6 +57,12 @@ resource "aws_kinesis_firehose_delivery_stream" "this" {
   name        = local.stream_name
   destination = "extended_s3"
 
+  # ── Server-Side Encryption at rest (Infracost/CIS recommendation) ─────────
+  server_side_encryption {
+    enabled  = true
+    key_type = "AWS_OWNED_CMK"
+  }
+
   extended_s3_configuration {
     role_arn   = aws_iam_role.firehose.arn
     bucket_arn = var.destination_bucket_arn
