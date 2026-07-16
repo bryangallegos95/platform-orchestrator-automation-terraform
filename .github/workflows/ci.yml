@@ -12,7 +12,8 @@
 #   ② lint       → tflint with AWS ruleset (plugin pre-installed in image)
 #   ③ plan       → terragrunt validate + plan, uploads artifact
 #   ④ cost       → infracost breakdown (only if changes detected)
-#   ⑤ create-pr  → auto-creates PR with plan + cost + DEPLOYMENT_CONTEXT metadata
+#   ⑤ security   → Checkmarx KICS (IaC scan — SAST/SCA/IaC)
+#   ⑥ create-pr  → auto-creates PR with plan + cost + security + DEPLOYMENT_CONTEXT
 #
 # ENVIRONMENT → RUNNER TAG → REGION MAPPING:
 #   dev      → [self-hosted, terraform, dev]      → us-east-1
@@ -68,6 +69,28 @@ on:
         required: false
         type: string
         default: ""
+
+      checkmarx_scan:
+        description: |
+          Control Checkmarx IaC security scan execution.
+          Values:
+            "auto"  → uses repo var CHECKMARX_ENABLED (default if var missing: true)
+            "true"  → always run scan (override)
+            "false" → never run scan (override — PoC repos)
+        required: false
+        type: string
+        default: "auto"
+
+      fail_on_high_critical:
+        description: |
+          Control whether CRITICAL/HIGH findings block PR creation.
+          Values:
+            "auto"  → uses repo var CHECKMARX_ENFORCE (default if var missing: false)
+            "true"  → always block on CRITICAL/HIGH (override)
+            "false" → report only, never block (override)
+        required: false
+        type: string
+        default: "auto"
         
       secret_titles:
         description: |
@@ -611,21 +634,151 @@ jobs:
           retention-days: 5
 
   # ─────────────────────────────────────────────
-  #  ⑤ CREATE PR
+  #  ⑤ SECURITY — Checkmarx IaC Scan (KICS)
+  #  Runs Checkmarx SAST/SCA/IaC-Security.
+  #  Control:
+  #    - input checkmarx_scan: "auto"|"true"|"false"
+  #    - repo var CHECKMARX_ENABLED: "true"|"false"
+  #    - repo var CHECKMARX_ENFORCE: "true"|"false"
+  #  Gate:
+  #    - If ENFORCE=true and CRITICAL/HIGH > 0 → job fails → PR not created
+  # ─────────────────────────────────────────────
+  security:
+    name: "⑤ Security"
+    needs: [resolve, plan]
+    if: |
+      always() &&
+      needs.plan.result == 'success' &&
+      (
+        inputs.checkmarx_scan == 'true' ||
+        (inputs.checkmarx_scan == 'auto' && vars.CHECKMARX_ENABLED != 'false')
+      )
+    runs-on: ubuntu-latest
+
+    outputs:
+      scan_executed: ${{ steps.scan_result.outputs.scan_executed }}
+      total_critical: ${{ steps.evaluate.outputs.total_critical }}
+      total_high: ${{ steps.evaluate.outputs.total_high }}
+      total_medium: ${{ steps.evaluate.outputs.total_medium }}
+      scan_id: ${{ steps.evaluate.outputs.scan_id }}
+      cx_summary: ${{ steps.build_summary.outputs.summary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
+
+      - name: Run Checkmarx IaC Scan
+        id: cxscan
+        continue-on-error: true
+        uses: checkmarx/ast-github-action@main
+        with:
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          base_uri: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}-iac
+          branch: ${{ inputs.pr_source_branch || github.ref_name }}
+          scan_params: >-
+            --scan-types sast,sca,iac-security
+            --sast-incremental=false
+            --report-format json
+            --output-path .
+
+      - name: Evaluate scan results
+        id: evaluate
+        run: |
+          if [ ! -f "cx_result.json" ]; then
+            echo "::warning::Checkmarx scan did not produce results file."
+            echo "scan_id=" >> $GITHUB_OUTPUT
+            echo "total_critical=0" >> $GITHUB_OUTPUT
+            echo "total_high=0" >> $GITHUB_OUTPUT
+            echo "total_medium=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SCAN_ID=$(jq -r '.scanID // "N/A"' cx_result.json)
+          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
+          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
+          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
+          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
+          KICS_CRIT=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="CRITICAL")] | length' cx_result.json)
+          KICS_HIGH=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="HIGH")] | length' cx_result.json)
+          KICS_MED=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="MEDIUM")] | length' cx_result.json)
+
+          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT + KICS_CRIT))
+          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH + KICS_HIGH))
+          TOTAL_MED=$((KICS_MED))
+
+          echo "scan_id=$SCAN_ID" >> $GITHUB_OUTPUT
+          echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
+          echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
+          echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ⑤ Security Scan (Checkmarx)
+          | Severity | Count |
+          |----------|-------|
+          | 🔴 CRITICAL | $TOTAL_CRIT |
+          | 🟠 HIGH | $TOTAL_HIGH |
+          | 🟡 MEDIUM | $TOTAL_MED |
+          | **Scan ID** | \`$SCAN_ID\` |
+          EOF
+
+      - name: Build summary for PR
+        id: build_summary
+        run: |
+          CRIT="${{ steps.evaluate.outputs.total_critical }}"
+          HIGH="${{ steps.evaluate.outputs.total_high }}"
+          MED="${{ steps.evaluate.outputs.total_medium }}"
+          SCAN_ID="${{ steps.evaluate.outputs.scan_id }}"
+
+          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
+            SUMMARY="✅ **Security:** No vulnerabilities found"
+          else
+            SUMMARY="🔒 **Security:** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium — [Details](${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}scans/$SCAN_ID)"
+          fi
+          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+
+      - name: Mark scan as executed
+        id: scan_result
+        run: echo "scan_executed=true" >> $GITHUB_OUTPUT
+
+      - name: Enforce security gate
+        if: |
+          inputs.fail_on_high_critical == 'true' ||
+          (inputs.fail_on_high_critical == 'auto' && vars.CHECKMARX_ENFORCE == 'true')
+        run: |
+          TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
+          TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
+
+          if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo "::error::❌ Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities found."
+            echo "::error::Fix the findings or request an exception via CloudOps."
+            echo "::error::Scan details: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}scans/${{ steps.evaluate.outputs.scan_id }}"
+            exit 1
+          fi
+
+          echo "✅ Security gate PASSED: 0 CRITICAL, 0 HIGH."
+
+  # ─────────────────────────────────────────────
+  #  ⑥ CREATE PR
   #  Auto-creates a Pull Request with:
   #    - Plan + cost in visible body
   #    - DEPLOYMENT_CONTEXT as hidden HTML metadata
   #      (parsed by cd-on-merge.yml after merge)
   # ─────────────────────────────────────────────
   create-pr:
-    name: "⑤ Create PR"
-    needs: [resolve, plan, cost]
+    name: "⑥ Create PR"
+    needs: [resolve, plan, cost, security]
     if: |
       always() &&
       inputs.create_pr &&
       inputs.pr_source_branch != '' &&
       inputs.pr_target_branch != '' &&
-      needs.plan.result == 'success'
+      needs.plan.result == 'success' &&
+      (needs.security.result == 'success' || needs.security.result == 'skipped')
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
@@ -660,10 +813,12 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           MONTHLY_COST="${{ needs.cost.outputs.monthly_cost }}"
           COST_DIFF="${{ needs.cost.outputs.cost_diff }}"
+          SECURITY_SUMMARY="${{ needs.security.outputs.cx_summary }}"
 
           # Default cost values if cost job was skipped (no changes)
           if [ -z "$MONTHLY_COST" ]; then MONTHLY_COST="N/A"; fi
           if [ -z "$COST_DIFF" ]; then COST_DIFF="N/A"; fi
+          if [ -z "$SECURITY_SUMMARY" ]; then SECURITY_SUMMARY="⏭️ Security scan skipped"; fi
 
           # Determine change status
           if [ "$EXITCODE" = "0" ]; then
@@ -735,6 +890,8 @@ jobs:
           | **Triggered by** | @${{ github.actor }} |
 
           ${STATUS_MSG}
+
+          ${SECURITY_SUMMARY}
 
           <details><summary>📋 Plan output (expand)</summary>
 
