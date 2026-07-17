@@ -187,6 +187,12 @@ variable "reader_principal_arns" {
   default     = []
 }
 
+variable "admin_principal_arns" {
+  description = "List of IAM principal ARNs excluded from the bucket deny policy (full access for management). MUST include the Terraform apply role, otherwise Terraform cannot refresh bucket state after creation."
+  type        = list(string)
+  default     = []
+}
+
 variable "writer_principal_arns" {
   description = "List of IAM principal ARNs that can WRITE to the bucket (s3:PutObject). E.g. Kinesis Firehose delivery role ARN."
   type        = list(string)

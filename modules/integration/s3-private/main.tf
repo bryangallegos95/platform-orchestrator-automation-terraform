@@ -164,6 +164,7 @@ resource "aws_s3_bucket_policy" "this" {
         Condition = {
           StringNotLike = {
             "aws:PrincipalArn" = concat(
+              var.admin_principal_arns,
               var.writer_principal_arns,
               var.reader_principal_arns,
               # Always allow the account root (for emergency access)
