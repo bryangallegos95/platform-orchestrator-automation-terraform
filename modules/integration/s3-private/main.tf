@@ -229,6 +229,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
     id     = "transition-and-expiration"
     status = "Enabled"
 
+    filter {
+      prefix = ""
+    }
+
     # Transition to Infrequent Access
     transition {
       days          = var.lifecycle_transition_ia_days
@@ -262,6 +266,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
   rule {
     id     = "abort-incomplete-multipart"
     status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
 
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
