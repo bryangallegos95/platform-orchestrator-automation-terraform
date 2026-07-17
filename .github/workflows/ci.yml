@@ -667,20 +667,23 @@ jobs:
           retention-days: 5
 
   # ─────────────────────────────────────────────
-  #  ⑤ SECURITY — Prowler (IaC + AWS CIS 2.0)
+  #  ⑤ SECURITY — Prowler IaC (Static Analysis)
   #  Primary security gate — replaces Checkmarx KICS.
   #
   #  What it does:
-  #    1. Installs Prowler via pip (until added to runner image)
-  #    2. Runs IaC scan against Terraform files
-  #    3. Runs AWS account scan (CIS 2.0) scoped to relevant services
+  #    1. Installs Prowler via pip (until added to runner Dockerfile)
+  #    2. Runs IaC static analysis against Terraform files (NO AWS credentials needed)
+  #    3. Outputs SARIF for GitHub Code Scanning integration
   #    4. Gates on CRITICAL/HIGH findings (blocks PR creation)
+  #
+  #  Architecture:
+  #    - CI: prowler iac (local, static, no secrets) → SARIF → GitHub
+  #    - CD: POST /api/v1/scans → Prowler App (ROSA) triggers account scan
+  #    - Continuous: Prowler App Scheduler (managed by Security team)
   #
   #  Control:
   #    - input security_scan: true|false (default: true)
   #    - input fail_on_high_critical: true|false (default: true)
-  #  Gate:
-  #    - If fail_on_high_critical=true and CRITICAL/HIGH > 0 → job fails
   # ─────────────────────────────────────────────
   security:
     name: "⑤ Security"
@@ -692,28 +695,17 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
-      scan_executed:  ${{ steps.scan_result.outputs.scan_executed }}
-      total_critical: ${{ steps.evaluate.outputs.total_critical }}
-      total_high:     ${{ steps.evaluate.outputs.total_high }}
-      total_medium:   ${{ steps.evaluate.outputs.total_medium }}
+      scan_executed:   ${{ steps.scan_result.outputs.scan_executed }}
+      total_critical:  ${{ steps.evaluate.outputs.total_critical }}
+      total_high:      ${{ steps.evaluate.outputs.total_high }}
+      total_medium:    ${{ steps.evaluate.outputs.total_medium }}
       prowler_summary: ${{ steps.build_summary.outputs.summary }}
-
-    env:
-      OU_NAME: ${{ inputs.ou_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
-
-      - name: Assume role in target account
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/${{ inputs.target_role_name }}"
-          aws-region: ${{ needs.resolve.outputs.region }}
-          role-session-name: "prowler-ci-${{ inputs.environment }}-${{ github.run_id }}"
-          role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
 
       - name: Install Prowler
         run: |
@@ -723,72 +715,23 @@ jobs:
           echo "✅ Prowler installed."
 
       - name: Run Prowler IaC scan
-        id: prowler_iac
+        id: prowler_scan
         continue-on-error: true
-        working-directory: ${{ inputs.working_directory }}
         run: |
-          echo "── Prowler IaC Scan (Terraform static analysis) ──"
+          echo "── Prowler IaC Scan (Terraform static analysis — no AWS credentials needed) ──"
           mkdir -p /tmp/prowler-results
 
           set +e
           prowler iac \
             --directory . \
-            --output-modes json \
+            --output-modes json sarif \
             --output-directory /tmp/prowler-results \
-            --verbose 2>&1 | tee /tmp/prowler-iac-output.txt
-          IAC_EXIT=$?
+            --verbose 2>&1 | tee /tmp/prowler-output.txt
+          PROWLER_EXIT=$?
           set -e
 
-          echo "iac_exit=$IAC_EXIT" >> $GITHUB_OUTPUT
-          echo "Prowler IaC scan exit code: $IAC_EXIT"
-
-      - name: Run Prowler AWS CIS 2.0 scan
-        id: prowler_aws
-        continue-on-error: true
-        run: |
-          echo "── Prowler AWS Account Scan (CIS 2.0 — scoped services) ──"
-          mkdir -p /tmp/prowler-results/aws
-
-          # Determine services to scan based on working directory content
-          SERVICES="iam,s3"
-          if grep -rql "aws_kinesis_firehose" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},firehose"
-          fi
-          if grep -rql "aws_appflow" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},appflow"
-          fi
-          if grep -rql "aws_kms" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},kms"
-          fi
-          if grep -rql "aws_lambda" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},awslambda"
-          fi
-          if grep -rql "aws_cloudwatch" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},cloudwatch"
-          fi
-          if grep -rql "aws_rds\|aws_db_instance" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},rds"
-          fi
-          if grep -rql "aws_ec2\|aws_instance\|aws_security_group" "${{ inputs.working_directory }}" 2>/dev/null; then
-            SERVICES="${SERVICES},ec2"
-          fi
-
-          echo "Scanning services: $SERVICES"
-          echo "Region: ${{ needs.resolve.outputs.region }}"
-
-          set +e
-          prowler aws \
-            --services $SERVICES \
-            --compliance aws_cis_2.0 \
-            --region ${{ needs.resolve.outputs.region }} \
-            --output-modes json csv \
-            --output-directory /tmp/prowler-results/aws \
-            --verbose 2>&1 | tee /tmp/prowler-aws-output.txt
-          AWS_EXIT=$?
-          set -e
-
-          echo "aws_exit=$AWS_EXIT" >> $GITHUB_OUTPUT
-          echo "Prowler AWS scan exit code: $AWS_EXIT"
+          echo "exit_code=$PROWLER_EXIT" >> $GITHUB_OUTPUT
+          echo "Prowler IaC scan exit code: $PROWLER_EXIT"
 
       - name: Evaluate scan results
         id: evaluate
@@ -797,23 +740,17 @@ jobs:
           TOTAL_HIGH=0
           TOTAL_MED=0
 
-          # Parse IaC results
-          for f in /tmp/prowler-results/*.json /tmp/prowler-results/**/*.json; do
+          # Parse Prowler JSON results (supports both legacy and OCSF formats)
+          for f in /tmp/prowler-results/*.json; do
             [ -f "$f" ] || continue
-            CRIT=$(jq -r '[.[] | select(.Severity == "critical" and .StatusExtended != "PASS")] | length' "$f" 2>/dev/null || echo "0")
-            HIGH=$(jq -r '[.[] | select(.Severity == "high" and .StatusExtended != "PASS")] | length' "$f" 2>/dev/null || echo "0")
-            MED=$(jq -r '[.[] | select(.Severity == "medium" and .StatusExtended != "PASS")] | length' "$f" 2>/dev/null || echo "0")
-            TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
-            TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
-            TOTAL_MED=$((TOTAL_MED + MED))
-          done
+            # Skip SARIF files
+            if jq -e '.["$schema"]' "$f" >/dev/null 2>&1; then continue; fi
 
-          # Also try OCSF format (Prowler 4.x default)
-          for f in /tmp/prowler-results/aws/*.json; do
-            [ -f "$f" ] || continue
-            CRIT=$(jq -r '[.[] | select(.severity == "CRITICAL" or .severity == "critical") | select(.status == "FAIL")] | length' "$f" 2>/dev/null || echo "0")
-            HIGH=$(jq -r '[.[] | select(.severity == "HIGH" or .severity == "high") | select(.status == "FAIL")] | length' "$f" 2>/dev/null || echo "0")
-            MED=$(jq -r '[.[] | select(.severity == "MEDIUM" or .severity == "medium") | select(.status == "FAIL")] | length' "$f" 2>/dev/null || echo "0")
+            # Try OCSF format (Prowler 4.x)
+            CRIT=$(jq -r '[.[] | select((.severity == "CRITICAL" or .severity == "critical") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+            HIGH=$(jq -r '[.[] | select((.severity == "HIGH" or .severity == "high") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+            MED=$(jq -r '[.[] | select((.severity == "MEDIUM" or .severity == "medium") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+
             TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
             TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
             TOTAL_MED=$((TOTAL_MED + MED))
@@ -824,15 +761,23 @@ jobs:
           echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⑤ Security Scan (Prowler — CIS AWS 2.0)
+          ### ⑤ Security Scan (Prowler IaC)
           | Severity | Count |
           |----------|-------|
           | CRITICAL | $TOTAL_CRIT |
           | HIGH | $TOTAL_HIGH |
           | MEDIUM | $TOTAL_MED |
-          | **Framework** | CIS AWS Foundations 2.0 |
-          | **Mode** | IaC + Account (scoped services) |
+          | **Mode** | Static IaC analysis (no AWS credentials) |
+          | **Post-deploy** | Prowler App triggers account scan after CD |
           EOF
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always() && hashFiles('/tmp/prowler-results/*.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: /tmp/prowler-results/
+          category: prowler-iac
+        continue-on-error: true
 
       - name: Build summary for PR
         id: build_summary
@@ -842,9 +787,9 @@ jobs:
           MED="${{ steps.evaluate.outputs.total_medium }}"
 
           if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
-            SUMMARY="✅ **Security (Prowler CIS 2.0):** No vulnerabilities found"
+            SUMMARY="✅ **Security (Prowler IaC):** No misconfigurations found"
           else
-            SUMMARY="🔒 **Security (Prowler CIS 2.0):** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium"
+            SUMMARY="🔒 **Security (Prowler IaC):** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium"
           fi
           echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
 
@@ -856,9 +801,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: prowler-ci-${{ inputs.environment }}-${{ github.sha }}
+          name: prowler-iac-${{ inputs.environment }}-${{ github.sha }}
           path: /tmp/prowler-results/
-          retention-days: 30
+          retention-days: 14
 
       - name: Enforce security gate
         if: inputs.fail_on_high_critical
@@ -867,13 +812,13 @@ jobs:
           TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
 
           if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
-            echo "::error::Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH findings (Prowler CIS 2.0)."
+            echo "::error::Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH IaC misconfigurations."
             echo "::error::Fix the findings before this PR can be created."
-            echo "::error::Review the prowler-ci artifact for detailed report."
+            echo "::error::Review the Prowler artifact or GitHub Code Scanning tab for details."
             exit 1
           fi
 
-          echo "✅ Security gate PASSED (Prowler CIS 2.0): 0 CRITICAL, 0 HIGH."
+          echo "✅ Security gate PASSED (Prowler IaC): 0 CRITICAL, 0 HIGH."
 
   # ─────────────────────────────────────────────
   #  ⑤b SAST — Checkmarx (Conditional)
