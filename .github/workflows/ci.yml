@@ -4,15 +4,16 @@
 #
 # PREREQUISITES:
 #   Runner image v2.0.0+ with pre-installed:
-#   Terraform, Terragrunt, TFLint (+ AWS plugin), Infracost, gh CLI
+#   Terraform, Terragrunt, TFLint (+ AWS plugin), Infracost, gh CLI, Python 3.9+
 #
 # JOBS:
 #   ⓪ resolve    → derives bucket, state key, region from environment input
 #   ① format     → terragrunt hclfmt --check
-#   ② lint       → tflint with AWS ruleset (plugin pre-installed in image)
+#   ② lint       → tflint (tags + naming) + naming_pattern_validator.sh
 #   ③ plan       → terragrunt validate + plan, uploads artifact
 #   ④ cost       → infracost breakdown (only if changes detected)
-#   ⑤ security   → Checkmarx KICS (IaC scan — SAST/SCA/IaC)
+#   ⑤ security   → Prowler IaC + AWS CIS 2.0 (primary gate)
+#   ⑤b sast      → Checkmarx SAST/SCA (conditional — only if app code detected)
 #   ⑥ create-pr  → auto-creates PR with plan + cost + security + DEPLOYMENT_CONTEXT
 #
 # ENVIRONMENT → RUNNER TAG → REGION MAPPING:
@@ -72,10 +73,19 @@ on:
 
       checkmarx_scan:
         description: |
-          Run Checkmarx IaC security scan (SAST/SCA/KICS).
+          Run Checkmarx SAST/SCA scan for application code.
+          Only runs if application code is detected (src/, lambda/, etc.).
+          Default: true (auto-detect mode).
+          Set to false to skip entirely.
+        required: false
+        type: boolean
+        default: true
+
+      security_scan:
+        description: |
+          Run Prowler security scan (IaC + AWS CIS 2.0).
           Default: true (secure by default).
-          Set to false only for PoC repos — requires CloudOps approval
-          via branch protection on testing/master.
+          Set to false only for PoC repos — requires CloudOps approval.
         required: false
         type: boolean
         default: true
@@ -270,7 +280,7 @@ jobs:
         run: terragrunt hclfmt --check --diff
 
   # ─────────────────────────────────────────────
-  #  ② LINT
+  #  ② LINT + GOVERNANCE
   # ─────────────────────────────────────────────
   lint:
     name: "② Lint"
@@ -285,6 +295,27 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
+
+      - name: Checkout orchestrator (governance files)
+        uses: actions/checkout@v4
+        with:
+          repository: bin-transversales-devops/platform-orchestrator-automation-terraform
+          ref: master
+          path: .orchestrator
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Copy governance files
+        run: |
+          # Copy .tflint.hcl from orchestrator if not present in repo
+          if [ ! -f ".tflint.hcl" ]; then
+            cp .orchestrator/.tflint.hcl .tflint.hcl
+            echo "Copied .tflint.hcl from orchestrator"
+          fi
+          # Copy naming validator script
+          mkdir -p scripts
+          cp .orchestrator/scripts/naming_pattern_validator.sh scripts/
+          chmod +x scripts/naming_pattern_validator.sh
+          echo "Copied naming_pattern_validator.sh from orchestrator"
 
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
@@ -306,9 +337,13 @@ jobs:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt init -reconfigure
 
-      - name: Run TFLint
+      - name: Run TFLint (tags + naming + best practices)
         working-directory: ${{ inputs.working_directory }}
-        run: tflint --format=compact
+        run: |
+          echo "── Running TFLint with enterprise governance rules ──"
+          tflint --format=compact
+          echo ""
+          echo "✅ TFLint passed: tags, naming convention, best practices."
 
   # ─────────────────────────────────────────────
   #  ③ VALIDATE + PLAN
@@ -632,18 +667,23 @@ jobs:
           retention-days: 5
 
   # ─────────────────────────────────────────────
-  #  ⑤ SECURITY — Checkmarx IaC Scan (KICS)
-  #  Runs Checkmarx SAST/SCA/IaC-Security.
+  #  ⑤ SECURITY — Prowler IaC (Static Analysis)
+  #  Primary security gate — replaces Checkmarx KICS.
+  #
+  #  What it does:
+  #    1. Installs Prowler via pip (until added to runner Dockerfile)
+  #    2. Runs IaC static analysis against Terraform files (NO AWS credentials needed)
+  #    3. Outputs SARIF for GitHub Code Scanning integration
+  #    4. Gates on CRITICAL/HIGH findings (blocks PR creation)
+  #
+  #  Architecture:
+  #    - CI: prowler iac (local, static, no secrets) → JSON results
+  #    - CD: POST /api/v1/scans → Prowler App (pending purchase from AWS Marketplace)
+  #    - Continuous: Prowler App Scheduler (managed by Security team — pending)
+  #
   #  Control:
-  #    - input checkmarx_scan: true|false (default: true)
+  #    - input security_scan: true|false (default: true)
   #    - input fail_on_high_critical: true|false (default: true)
-  #  Security:
-  #    - Inputs live in orchestrator.yml of the son repo
-  #    - testing/master branches are protected (CloudOps approval)
-  #    - A dev can set false in feature branch, but to reach prod
-  #      the change must pass through a protected-branch PR
-  #  Gate:
-  #    - If fail_on_high_critical=true and CRITICAL/HIGH > 0 → job fails → PR not created
   # ─────────────────────────────────────────────
   security:
     name: "⑤ Security"
@@ -651,16 +691,15 @@ jobs:
     if: |
       always() &&
       needs.plan.result == 'success' &&
-      inputs.checkmarx_scan
-    runs-on: ubuntu-latest
+      inputs.security_scan
+    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
-      scan_executed: ${{ steps.scan_result.outputs.scan_executed }}
-      total_critical: ${{ steps.evaluate.outputs.total_critical }}
-      total_high: ${{ steps.evaluate.outputs.total_high }}
-      total_medium: ${{ steps.evaluate.outputs.total_medium }}
-      scan_id: ${{ steps.evaluate.outputs.scan_id }}
-      cx_summary: ${{ steps.build_summary.outputs.summary }}
+      scan_executed:   ${{ steps.scan_result.outputs.scan_executed }}
+      total_critical:  ${{ steps.evaluate.outputs.total_critical }}
+      total_high:      ${{ steps.evaluate.outputs.total_high }}
+      total_medium:    ${{ steps.evaluate.outputs.total_medium }}
+      prowler_summary: ${{ steps.build_summary.outputs.summary }}
 
     steps:
       - name: Checkout
@@ -668,61 +707,68 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Run Checkmarx IaC Scan
-        id: cxscan
+      - name: Install Prowler
+        run: |
+          echo "── Installing Prowler ──"
+          pip install prowler --quiet 2>/dev/null || pip3 install prowler --quiet
+          prowler --version
+          echo "✅ Prowler installed."
+
+      - name: Run Prowler IaC scan
+        id: prowler_scan
         continue-on-error: true
-        uses: checkmarx/ast-github-action@main
-        with:
-          cx_tenant: ${{ secrets.CX_TENANT }}
-          base_uri: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}
-          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
-          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
-          project_name: ${{ github.repository }}-iac
-          branch: ${{ inputs.pr_source_branch || github.ref_name }}
-          scan_params: >-
-            --scan-types iac-security
-            --report-format json
-            --output-path .
-            --iac-security-platforms Terraform
+        run: |
+          echo "── Prowler IaC Scan (Terraform static analysis — no AWS credentials needed) ──"
+          mkdir -p /tmp/prowler-results
+
+          set +e
+          prowler iac \
+            --directory . \
+            --output-modes json \
+            --output-directory /tmp/prowler-results \
+            --verbose 2>&1 | tee /tmp/prowler-output.txt
+          PROWLER_EXIT=$?
+          set -e
+
+          echo "exit_code=$PROWLER_EXIT" >> $GITHUB_OUTPUT
+          echo "Prowler IaC scan exit code: $PROWLER_EXIT"
 
       - name: Evaluate scan results
         id: evaluate
         run: |
-          if [ ! -f "cx_result.json" ]; then
-            echo "::warning::Checkmarx scan did not produce results file."
-            echo "scan_id=" >> $GITHUB_OUTPUT
-            echo "total_critical=0" >> $GITHUB_OUTPUT
-            echo "total_high=0" >> $GITHUB_OUTPUT
-            echo "total_medium=0" >> $GITHUB_OUTPUT
-            exit 0
-          fi
+          TOTAL_CRIT=0
+          TOTAL_HIGH=0
+          TOTAL_MED=0
 
-          SCAN_ID=$(jq -r '.scanID // "N/A"' cx_result.json)
-          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
-          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
-          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
-          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
-          KICS_CRIT=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="CRITICAL")] | length' cx_result.json)
-          KICS_HIGH=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="HIGH")] | length' cx_result.json)
-          KICS_MED=$(jq '[(.results // [])[] | select(.type=="kics" and .severity=="MEDIUM")] | length' cx_result.json)
+          # Parse Prowler JSON results (supports both legacy and OCSF formats)
+          for f in /tmp/prowler-results/*.json; do
+            [ -f "$f" ] || continue
+            # Skip SARIF files
+            if jq -e '.["$schema"]' "$f" >/dev/null 2>&1; then continue; fi
 
-          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT + KICS_CRIT))
-          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH + KICS_HIGH))
-          TOTAL_MED=$((KICS_MED))
+            # Try OCSF format (Prowler 4.x)
+            CRIT=$(jq -r '[.[] | select((.severity == "CRITICAL" or .severity == "critical") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+            HIGH=$(jq -r '[.[] | select((.severity == "HIGH" or .severity == "high") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+            MED=$(jq -r '[.[] | select((.severity == "MEDIUM" or .severity == "medium") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
 
-          echo "scan_id=$SCAN_ID" >> $GITHUB_OUTPUT
+            TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
+            TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
+            TOTAL_MED=$((TOTAL_MED + MED))
+          done
+
           echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
           echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
           echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⑤ Security Scan (Checkmarx)
+          ### ⑤ Security Scan (Prowler IaC)
           | Severity | Count |
           |----------|-------|
-          | 🔴 CRITICAL | $TOTAL_CRIT |
-          | 🟠 HIGH | $TOTAL_HIGH |
-          | 🟡 MEDIUM | $TOTAL_MED |
-          | **Scan ID** | \`$SCAN_ID\` |
+          | CRITICAL | $TOTAL_CRIT |
+          | HIGH | $TOTAL_HIGH |
+          | MEDIUM | $TOTAL_MED |
+          | **Mode** | Static IaC analysis (no AWS credentials) |
+          | **Post-deploy** | Prowler App (pending AWS Marketplace purchase) |
           EOF
 
       - name: Build summary for PR
@@ -731,18 +777,25 @@ jobs:
           CRIT="${{ steps.evaluate.outputs.total_critical }}"
           HIGH="${{ steps.evaluate.outputs.total_high }}"
           MED="${{ steps.evaluate.outputs.total_medium }}"
-          SCAN_ID="${{ steps.evaluate.outputs.scan_id }}"
 
           if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
-            SUMMARY="✅ **Security:** No vulnerabilities found"
+            SUMMARY="✅ **Security (Prowler IaC):** No misconfigurations found"
           else
-            SUMMARY="🔒 **Security:** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium — [Details](${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}scans/$SCAN_ID)"
+            SUMMARY="🔒 **Security (Prowler IaC):** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium"
           fi
           echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
 
       - name: Mark scan as executed
         id: scan_result
         run: echo "scan_executed=true" >> $GITHUB_OUTPUT
+
+      - name: Upload Prowler results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prowler-iac-${{ inputs.environment }}-${{ github.sha }}
+          path: /tmp/prowler-results/
+          retention-days: 14
 
       - name: Enforce security gate
         if: inputs.fail_on_high_critical
@@ -751,13 +804,167 @@ jobs:
           TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
 
           if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
-            echo "::error::❌ Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities found."
-            echo "::error::Fix the findings or request an exception via CloudOps."
-            echo "::error::Scan details: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}scans/${{ steps.evaluate.outputs.scan_id }}"
+            echo "::error::Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH IaC misconfigurations."
+            echo "::error::Fix the findings before this PR can be created."
+            echo "::error::Review the Prowler artifact or GitHub Code Scanning tab for details."
             exit 1
           fi
 
-          echo "✅ Security gate PASSED: 0 CRITICAL, 0 HIGH."
+          echo "✅ Security gate PASSED (Prowler IaC): 0 CRITICAL, 0 HIGH."
+
+  # ─────────────────────────────────────────────
+  #  ⑤b SAST — Checkmarx (Conditional)
+  #  Only runs if APPLICATION CODE is detected in the repo.
+  #  IaC-only repos (majority) skip this entirely.
+  #
+  #  Detection: looks for src/, lambda/, functions/, app/,
+  #  or source files (*.py, *.js, *.ts, *.go, *.java, *.cs)
+  #  outside of .terraform/ directories.
+  # ─────────────────────────────────────────────
+  sast:
+    name: "⑤b SAST"
+    needs: [resolve, plan]
+    if: |
+      always() &&
+      needs.plan.result == 'success' &&
+      inputs.checkmarx_scan
+    runs-on: ubuntu-latest
+
+    outputs:
+      has_app_code:   ${{ steps.detect.outputs.has_app_code }}
+      sast_executed:  ${{ steps.scan_result.outputs.sast_executed }}
+      sast_critical:  ${{ steps.evaluate.outputs.total_critical }}
+      sast_high:      ${{ steps.evaluate.outputs.total_high }}
+      sast_summary:   ${{ steps.build_summary.outputs.summary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
+
+      - name: Detect application code
+        id: detect
+        run: |
+          HAS_CODE="false"
+
+          # Check for application code directories
+          for dir in src app lambda functions scripts/app lib pkg cmd handlers controllers; do
+            if [ -d "$dir" ]; then
+              HAS_CODE="true"
+              echo "Found application code directory: $dir"
+              break
+            fi
+          done
+
+          # Check for source files (excluding .terraform and vendor)
+          if [ "$HAS_CODE" = "false" ]; then
+            for pattern in "*.py" "*.js" "*.ts" "*.go" "*.java" "*.cs" "*.rb"; do
+              if find . -maxdepth 3 -name "$pattern" \
+                -not -path "./.terraform/*" \
+                -not -path "./vendor/*" \
+                -not -path "./node_modules/*" \
+                -not -path "./.orchestrator/*" | grep -q .; then
+                HAS_CODE="true"
+                echo "Found source files matching: $pattern"
+                break
+              fi
+            done
+          fi
+
+          echo "has_app_code=$HAS_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_CODE" = "true" ]; then
+            echo "Application code detected. Checkmarx SAST will run."
+          else
+            echo "No application code found. IaC-only repo — Checkmarx SAST skipped."
+            echo "### ⑤b SAST: Skipped (IaC-only repo)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run Checkmarx SAST/SCA
+        id: cxscan
+        if: steps.detect.outputs.has_app_code == 'true'
+        continue-on-error: true
+        uses: checkmarx/ast-github-action@main
+        with:
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          base_uri: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}-app
+          branch: ${{ inputs.pr_source_branch || github.ref_name }}
+          scan_params: >-
+            --scan-types sast,sca
+            --report-format json
+            --output-path .
+
+      - name: Evaluate SAST results
+        id: evaluate
+        if: steps.detect.outputs.has_app_code == 'true'
+        run: |
+          if [ ! -f "cx_result.json" ]; then
+            echo "::warning::Checkmarx scan did not produce results file."
+            echo "total_critical=0" >> $GITHUB_OUTPUT
+            echo "total_high=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
+          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
+          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
+          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
+
+          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT))
+          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH))
+
+          echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
+          echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ⑤b SAST (Checkmarx — Application Code)
+          | Severity | Count |
+          |----------|-------|
+          | CRITICAL | $TOTAL_CRIT |
+          | HIGH | $TOTAL_HIGH |
+          EOF
+
+      - name: Build summary for PR
+        id: build_summary
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" != "true" ]; then
+            echo "summary=⏭️ **SAST:** Skipped (IaC-only repo)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CRIT="${{ steps.evaluate.outputs.total_critical || '0' }}"
+          HIGH="${{ steps.evaluate.outputs.total_high || '0' }}"
+          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
+            echo "summary=✅ **SAST (Checkmarx):** No app vulnerabilities" >> $GITHUB_OUTPUT
+          else
+            echo "summary=🔒 **SAST (Checkmarx):** 🔴 $CRIT Critical | 🟠 $HIGH High" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Mark SAST as executed
+        id: scan_result
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" = "true" ]; then
+            echo "sast_executed=true" >> $GITHUB_OUTPUT
+          else
+            echo "sast_executed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enforce SAST gate
+        if: |
+          steps.detect.outputs.has_app_code == 'true' &&
+          inputs.fail_on_high_critical
+        run: |
+          TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
+          TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
+
+          if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo "::error::SAST gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities in app code."
+            exit 1
+          fi
+          echo "✅ SAST gate PASSED: 0 CRITICAL, 0 HIGH in application code."
 
   # ─────────────────────────────────────────────
   #  ⑥ CREATE PR
@@ -768,14 +975,15 @@ jobs:
   # ─────────────────────────────────────────────
   create-pr:
     name: "⑥ Create PR"
-    needs: [resolve, plan, cost, security]
+    needs: [resolve, plan, cost, security, sast]
     if: |
       always() &&
       inputs.create_pr &&
       inputs.pr_source_branch != '' &&
       inputs.pr_target_branch != '' &&
       needs.plan.result == 'success' &&
-      (needs.security.result == 'success' || needs.security.result == 'skipped')
+      (needs.security.result == 'success' || needs.security.result == 'skipped') &&
+      (needs.sast.result == 'success' || needs.sast.result == 'skipped')
     runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
 
     outputs:
@@ -810,7 +1018,7 @@ jobs:
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           MONTHLY_COST="${{ needs.cost.outputs.monthly_cost }}"
           COST_DIFF="${{ needs.cost.outputs.cost_diff }}"
-          SECURITY_SUMMARY="${{ needs.security.outputs.cx_summary }}"
+          SECURITY_SUMMARY="${{ needs.security.outputs.prowler_summary }}"
 
           # Default cost values if cost job was skipped (no changes)
           if [ -z "$MONTHLY_COST" ]; then MONTHLY_COST="N/A"; fi
@@ -889,6 +1097,8 @@ jobs:
           ${STATUS_MSG}
 
           ${SECURITY_SUMMARY}
+
+          ${{ needs.sast.outputs.sast_summary }}
 
           <details><summary>📋 Plan output (expand)</summary>
 

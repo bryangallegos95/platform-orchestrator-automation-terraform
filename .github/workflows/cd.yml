@@ -12,10 +12,13 @@
 #   - Apply failure → auto-destroy (dev/qa) or alert-only (preprod/prod/dr).
 #   - One apply per environment at a time (concurrency queue, never cancel).
 #   - On success → creates promotion Issue with /approve /reject commands.
+#   - Post-apply → triggers Prowler App scan (when available).
+#   - Promotion Issue includes CloudCheckr FinOps deeplink.
 #
 # JOBS:
 #   ⓪ resolve           → derives region, bucket, state key
 #   ① apply             → downloads plan + applies (or skips if no changes)
+#                          + triggers Prowler App scan (commented — pending purchase)
 #   ② promotion-issue   → creates GitHub Issue for team validation (on success)
 
 name: "[reusable] Terraform CD"
@@ -400,9 +403,53 @@ jobs:
             echo "value=${OUTCOME:-failed}" >> $GITHUB_OUTPUT
           fi
 
+      # ── Fail job on apply error ───────────────────────────────────
       - name: Fail job on apply error
         if: env.APPLY_FAILED == 'true'
         run: exit 1
+
+      # ── Prowler App: trigger post-deploy scan (COMMENTED — pending AWS Marketplace purchase) ──
+      # Uncomment this step once Prowler App is active in ROSA.
+      # It triggers an on-demand scan for the account/env that was just deployed.
+      # The scan results will appear in the Prowler App UI (managed by Security team).
+      #
+      # - name: "Trigger Prowler App scan (post-deploy)"
+      #   if: env.APPLY_FAILED != 'true' && inputs.plan_exitcode != '0'
+      #   env:
+      #     PROWLER_APP_URL: ${{ vars.PROWLER_APP_URL }}
+      #     PROWLER_APP_TOKEN: ${{ secrets.PROWLER_APP_TOKEN }}
+      #   run: |
+      #     if [ -z "$PROWLER_APP_URL" ] || [ -z "$PROWLER_APP_TOKEN" ]; then
+      #       echo "::notice::Prowler App not configured. Skipping post-deploy scan trigger."
+      #       exit 0
+      #     fi
+      #
+      #     echo "── Triggering Prowler App scan for account ${{ inputs.account_id }} ──"
+      #     HTTP_CODE=$(curl -s -o /tmp/prowler-response.json -w "%{http_code}" \
+      #       -X POST "${PROWLER_APP_URL}/api/v1/scans" \
+      #       -H "Authorization: Bearer ${PROWLER_APP_TOKEN}" \
+      #       -H "Content-Type: application/json" \
+      #       -d '{
+      #         "account_id": "${{ inputs.account_id }}",
+      #         "region": "${{ needs.resolve.outputs.region }}",
+      #         "scan_type": "on-demand",
+      #         "triggered_by": "cd-pipeline",
+      #         "metadata": {
+      #           "repository": "${{ github.repository }}",
+      #           "environment": "${{ inputs.environment }}",
+      #           "commit": "${{ github.sha }}",
+      #           "run_id": "${{ github.run_id }}"
+      #         }
+      #       }')
+      #
+      #     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "202" ]; then
+      #       SCAN_ID=$(jq -r '.scan_id // .id // "unknown"' /tmp/prowler-response.json)
+      #       echo "✅ Prowler App scan triggered. Scan ID: $SCAN_ID"
+      #       echo "   View results at: ${PROWLER_APP_URL}/scans/${SCAN_ID}"
+      #     else
+      #       echo "::warning::Prowler App scan trigger failed (HTTP $HTTP_CODE). Non-blocking."
+      #       cat /tmp/prowler-response.json 2>/dev/null || true
+      #     fi
 
   # ─────────────────────────────────────────────
   #  ② PROMOTION ISSUE
@@ -459,6 +506,16 @@ jobs:
             *)       ENV_EMOJI="📦" ;;
           esac
 
+          # CloudCheckr deeplink (filtered by repo tags)
+          # Adjust URL pattern when CloudCheckr CMx API Client is configured
+          CC_BASE="${{ vars.CLOUDCHECKR_URL }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          if [ -n "$CC_BASE" ]; then
+            CLOUDCHECKR_URL="${CC_BASE}/app/#/cost?filter[tag:Repositorio]=${REPO_NAME}&filter[tag:Ambiente]=${ENV}"
+          else
+            CLOUDCHECKR_URL="https://app.cloudcheckr.com (configure vars.CLOUDCHECKR_URL)"
+          fi
+
           # Issue title
           ISSUE_TITLE="${ENV_EMOJI} [${ENV^^}] Validate: ${{ github.event.repository.name }} — ${SHORT_SHA}"
 
@@ -479,6 +536,10 @@ jobs:
           ## 🔗 Links
           - [CI/CD Run](${RUN_URL})
           - [Repository](https://github.com/${REPO})
+          - [CloudCheckr Dashboard](${CLOUDCHECKR_URL})
+
+          ## 💰 FinOps
+          > View real-time cost for this deployment in [CloudCheckr]($CLOUDCHECKR_URL) (filtered by Repositorio + Ambiente tags).
 
           ## ✅ Validation Checklist
           - [ ] Infrastructure accessible and functional
