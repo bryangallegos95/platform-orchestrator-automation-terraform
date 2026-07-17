@@ -677,9 +677,9 @@ jobs:
   #    4. Gates on CRITICAL/HIGH findings (blocks PR creation)
   #
   #  Architecture:
-  #    - CI: prowler iac (local, static, no secrets) → SARIF → GitHub
-  #    - CD: POST /api/v1/scans → Prowler App (ROSA) triggers account scan
-  #    - Continuous: Prowler App Scheduler (managed by Security team)
+  #    - CI: prowler iac (local, static, no secrets) → JSON results
+  #    - CD: POST /api/v1/scans → Prowler App (pending purchase from AWS Marketplace)
+  #    - Continuous: Prowler App Scheduler (managed by Security team — pending)
   #
   #  Control:
   #    - input security_scan: true|false (default: true)
@@ -724,7 +724,7 @@ jobs:
           set +e
           prowler iac \
             --directory . \
-            --output-modes json sarif \
+            --output-modes json \
             --output-directory /tmp/prowler-results \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
           PROWLER_EXIT=$?
@@ -768,16 +768,8 @@ jobs:
           | HIGH | $TOTAL_HIGH |
           | MEDIUM | $TOTAL_MED |
           | **Mode** | Static IaC analysis (no AWS credentials) |
-          | **Post-deploy** | Prowler App triggers account scan after CD |
+          | **Post-deploy** | Prowler App (pending AWS Marketplace purchase) |
           EOF
-
-      - name: Upload SARIF to GitHub Code Scanning
-        if: always() && hashFiles('/tmp/prowler-results/*.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: /tmp/prowler-results/
-          category: prowler-iac
-        continue-on-error: true
 
       - name: Build summary for PR
         id: build_summary
