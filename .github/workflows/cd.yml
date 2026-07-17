@@ -507,14 +507,8 @@ jobs:
           esac
 
           # CloudCheckr deeplink (filtered by repo tags)
-          # Adjust URL pattern when CloudCheckr CMx API Client is configured
-          CC_BASE="${{ vars.CLOUDCHECKR_URL }}"
           REPO_NAME="${{ github.event.repository.name }}"
-          if [ -n "$CC_BASE" ]; then
-            CLOUDCHECKR_URL="${CC_BASE}/app/#/cost?filter[tag:Repositorio]=${REPO_NAME}&filter[tag:Ambiente]=${ENV}"
-          else
-            CLOUDCHECKR_URL="https://app.cloudcheckr.com (configure vars.CLOUDCHECKR_URL)"
-          fi
+          CLOUDCHECKR_URL="https://app-us.cloudcheckr.com/app/#/cost?filter[tag:Repositorio]=${REPO_NAME}&filter[tag:Ambiente]=${ENV}"
 
           # Issue title
           ISSUE_TITLE="${ENV_EMOJI} [${ENV^^}] Validate: ${{ github.event.repository.name }} — ${SHORT_SHA}"
