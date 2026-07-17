@@ -692,7 +692,7 @@ jobs:
       always() &&
       needs.plan.result == 'success' &&
       inputs.security_scan
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: ubuntu-latest
 
     outputs:
       scan_executed:   ${{ steps.scan_result.outputs.scan_executed }}
@@ -707,10 +707,15 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install Prowler
         run: |
-          echo "── Installing Prowler ──"
-          pip install prowler --quiet 2>/dev/null || pip3 install prowler --quiet
+          echo "── Installing Prowler (Python $(python3 --version)) ──"
+          pip install prowler --quiet
           prowler --version
           echo "✅ Prowler installed."
 
