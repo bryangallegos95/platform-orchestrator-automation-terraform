@@ -692,7 +692,7 @@ jobs:
       always() &&
       needs.plan.result == 'success' &&
       inputs.security_scan
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: ubuntu-latest
 
     outputs:
       scan_executed:   ${{ steps.scan_result.outputs.scan_executed }}
@@ -707,22 +707,30 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Prowler
+        run: |
+          echo "── Installing Prowler (Python $(python3 --version)) ──"
+          pip install prowler --quiet
+          prowler --version
+          echo "✅ Prowler installed."
+
       - name: Run Prowler IaC scan
         id: prowler_scan
         continue-on-error: true
         run: |
           echo "── Prowler IaC Scan (Terraform static analysis — no AWS credentials needed) ──"
-          echo "   Using Docker image (runner Python 3.14 is not supported by Prowler)"
           mkdir -p /tmp/prowler-results
 
           set +e
-          docker run --rm \
-            -v "$(pwd):/workspace" \
-            -v "/tmp/prowler-results:/output" \
-            prowlercloud/prowler:latest \
-            iac --directory /workspace \
+          prowler iac \
+            --directory . \
             --output-modes json \
-            --output-directory /output \
+            --output-directory /tmp/prowler-results \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
           PROWLER_EXIT=$?
           set -e
