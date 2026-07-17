@@ -19,7 +19,7 @@ output "bucket_name" {
 }
 
 output "bucket_domain_name" {
-  description = "Bucket domain name (e.g. s3-aw-ue1-bancamovil-ga4-dev.s3.amazonaws.com)."
+  description = "Bucket domain name (e.g. s3-aw-ue1-myservice-data-dev.s3.amazonaws.com)."
   value       = aws_s3_bucket.this.bucket_domain_name
 }
 
@@ -34,9 +34,9 @@ output "kms_key_arn" {
   value       = local.kms_key_arn
 }
 
-# ── For Stratio (s3a:// connector) ────────────────────────────────────────────
+# ── For S3A-compatible connectors (Spark, Hadoop) ─────────────────────────────
 output "s3a_uri" {
-  description = "S3A URI for Stratio/Spark connector (core-site.xml fs.defaultFS value)."
+  description = "S3A URI for Spark/Hadoop connectors (fs.defaultFS value)."
   value       = "s3a://${local.bucket_name}"
 }
 

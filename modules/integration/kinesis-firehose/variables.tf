@@ -17,7 +17,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "service" {
-  description = "Short service / product name used in resource naming. E.g. 'bancamovil'."
+  description = "Short service / product name used in resource naming. E.g. 'payments', 'analytics'."
   type        = string
 
   validation {

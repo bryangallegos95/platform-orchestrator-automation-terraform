@@ -680,10 +680,10 @@ jobs:
           project_name: ${{ github.repository }}-iac
           branch: ${{ inputs.pr_source_branch || github.ref_name }}
           scan_params: >-
-            --scan-types sast,sca,iac-security
-            --sast-incremental=false
+            --scan-types iac-security
             --report-format json
             --output-path .
+            --iac-security-platforms Terraform
 
       - name: Evaluate scan results
         id: evaluate

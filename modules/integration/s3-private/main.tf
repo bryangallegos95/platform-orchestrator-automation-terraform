@@ -192,7 +192,7 @@ resource "aws_s3_bucket_policy" "this" {
         ]
       }] : [],
 
-      # ── Statement 4: Allow readers (Stratio) ────────────────────────────────
+      # ── Statement 4: Allow readers ─────────────────────────────────────────
       length(var.reader_principal_arns) > 0 ? [{
         Sid       = "AllowReaders"
         Effect    = "Allow"
