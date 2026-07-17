@@ -76,15 +76,21 @@ variable "aws_account_id" {
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "source_connector_type" {
-  description = "Source connector type. E.g. 'Googleanalytics4', 'Salesforce', 'S3', 'CustomConnector'."
+  description = "Source connector type. For GA4 use 'CustomConnector' with connector_label 'GoogleAnalytics4'. Native types: 'Salesforce', 'S3', 'Zendesk', etc."
   type        = string
-  default     = "Googleanalytics4"
+  default     = "CustomConnector"
 }
 
 variable "source_connector_profile_name" {
   description = "Name of an existing AppFlow connector profile to use as source. If empty, the module creates one using the provided credentials."
   type        = string
   default     = ""
+}
+
+variable "source_connector_label" {
+  description = "Connector label for CustomConnector type (e.g. 'GoogleAnalytics4'). Required when source_connector_type = 'CustomConnector'."
+  type        = string
+  default     = "GoogleAnalytics4"
 }
 
 variable "source_object" {
