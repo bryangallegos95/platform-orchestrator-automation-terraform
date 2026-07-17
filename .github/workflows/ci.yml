@@ -711,6 +711,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install Prowler
         run: |
@@ -728,8 +729,8 @@ jobs:
 
           set +e
           prowler iac \
-            --directory . \
-            --output-modes json \
+            --scan-path . \
+            --output-formats json-ocsf \
             --output-directory /tmp/prowler-results \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
           PROWLER_EXIT=$?
@@ -745,16 +746,21 @@ jobs:
           TOTAL_HIGH=0
           TOTAL_MED=0
 
-          # Parse Prowler JSON results (supports both legacy and OCSF formats)
-          for f in /tmp/prowler-results/*.json; do
+          # Parse Prowler JSON-OCSF results
+          for f in /tmp/prowler-results/*.json /tmp/prowler-results/**/*.json; do
             [ -f "$f" ] || continue
-            # Skip SARIF files
-            if jq -e '.["$schema"]' "$f" >/dev/null 2>&1; then continue; fi
 
-            # Try OCSF format (Prowler 4.x)
-            CRIT=$(jq -r '[.[] | select((.severity == "CRITICAL" or .severity == "critical") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
-            HIGH=$(jq -r '[.[] | select((.severity == "HIGH" or .severity == "high") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
-            MED=$(jq -r '[.[] | select((.severity == "MEDIUM" or .severity == "medium") and (.status == "FAIL" or .status == "fail"))] | length' "$f" 2>/dev/null || echo "0")
+            # OCSF format: severity_id (1=Info, 2=Low, 3=Medium, 4=High, 5=Critical)
+            CRIT=$(jq '[.[] | select(.severity_id == 5 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
+            HIGH=$(jq '[.[] | select(.severity_id == 4 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
+            MED=$(jq '[.[] | select(.severity_id == 3 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
+
+            # Fallback: try string-based severity field
+            if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
+              CRIT=$(jq '[.[] | select((.severity == "CRITICAL" or .severity == "critical") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
+              HIGH=$(jq '[.[] | select((.severity == "HIGH" or .severity == "high") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
+              MED=$(jq '[.[] | select((.severity == "MEDIUM" or .severity == "medium") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
+            fi
 
             TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
             TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
