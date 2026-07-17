@@ -707,25 +707,22 @@ jobs:
         with:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
-      - name: Install Prowler
-        run: |
-          echo "── Installing Prowler ──"
-          pip install prowler --quiet 2>/dev/null || pip3 install prowler --quiet
-          prowler --version
-          echo "✅ Prowler installed."
-
       - name: Run Prowler IaC scan
         id: prowler_scan
         continue-on-error: true
         run: |
           echo "── Prowler IaC Scan (Terraform static analysis — no AWS credentials needed) ──"
+          echo "   Using Docker image (runner Python 3.14 is not supported by Prowler)"
           mkdir -p /tmp/prowler-results
 
           set +e
-          prowler iac \
-            --directory . \
+          docker run --rm \
+            -v "$(pwd):/workspace" \
+            -v "/tmp/prowler-results:/output" \
+            prowlercloud/prowler:latest \
+            iac --directory /workspace \
             --output-modes json \
-            --output-directory /tmp/prowler-results \
+            --output-directory /output \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
           PROWLER_EXIT=$?
           set -e
