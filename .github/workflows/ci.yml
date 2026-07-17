@@ -72,25 +72,23 @@ on:
 
       checkmarx_scan:
         description: |
-          Control Checkmarx IaC security scan execution.
-          Values:
-            "auto"  → uses repo var CHECKMARX_ENABLED (default if var missing: true)
-            "true"  → always run scan (override)
-            "false" → never run scan (override — PoC repos)
+          Run Checkmarx IaC security scan (SAST/SCA/KICS).
+          Default: true (secure by default).
+          Set to false only for PoC repos — requires CloudOps approval
+          via branch protection on testing/master.
         required: false
-        type: string
-        default: "auto"
+        type: boolean
+        default: true
 
       fail_on_high_critical:
         description: |
-          Control whether CRITICAL/HIGH findings block PR creation.
-          Values:
-            "auto"  → uses repo var CHECKMARX_ENFORCE (default if var missing: false)
-            "true"  → always block on CRITICAL/HIGH (override)
-            "false" → report only, never block (override)
+          Fail pipeline and block PR creation on CRITICAL/HIGH findings.
+          Default: true (enforce by default).
+          Set to false for report-only mode — requires CloudOps approval
+          via branch protection on testing/master.
         required: false
-        type: string
-        default: "auto"
+        type: boolean
+        default: true
         
       secret_titles:
         description: |
@@ -637,11 +635,15 @@ jobs:
   #  ⑤ SECURITY — Checkmarx IaC Scan (KICS)
   #  Runs Checkmarx SAST/SCA/IaC-Security.
   #  Control:
-  #    - input checkmarx_scan: "auto"|"true"|"false"
-  #    - repo var CHECKMARX_ENABLED: "true"|"false"
-  #    - repo var CHECKMARX_ENFORCE: "true"|"false"
+  #    - input checkmarx_scan: true|false (default: true)
+  #    - input fail_on_high_critical: true|false (default: true)
+  #  Security:
+  #    - Inputs live in orchestrator.yml of the son repo
+  #    - testing/master branches are protected (CloudOps approval)
+  #    - A dev can set false in feature branch, but to reach prod
+  #      the change must pass through a protected-branch PR
   #  Gate:
-  #    - If ENFORCE=true and CRITICAL/HIGH > 0 → job fails → PR not created
+  #    - If fail_on_high_critical=true and CRITICAL/HIGH > 0 → job fails → PR not created
   # ─────────────────────────────────────────────
   security:
     name: "⑤ Security"
@@ -649,10 +651,7 @@ jobs:
     if: |
       always() &&
       needs.plan.result == 'success' &&
-      (
-        inputs.checkmarx_scan == 'true' ||
-        (inputs.checkmarx_scan == 'auto' && vars.CHECKMARX_ENABLED != 'false')
-      )
+      inputs.checkmarx_scan
     runs-on: ubuntu-latest
 
     outputs:
@@ -746,9 +745,7 @@ jobs:
         run: echo "scan_executed=true" >> $GITHUB_OUTPUT
 
       - name: Enforce security gate
-        if: |
-          inputs.fail_on_high_critical == 'true' ||
-          (inputs.fail_on_high_critical == 'auto' && vars.CHECKMARX_ENFORCE == 'true')
+        if: inputs.fail_on_high_critical
         run: |
           TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
           TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
