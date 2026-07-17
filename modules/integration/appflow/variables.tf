@@ -13,7 +13,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "service" {
-  description = "Short service / product name used in resource naming. E.g. 'bancamovil'."
+  description = "Short service / product name used in resource naming. E.g. 'payments', 'analytics'."
   type        = string
 
   validation {
@@ -76,7 +76,7 @@ variable "aws_account_id" {
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "source_connector_type" {
-  description = "Source connector type. For GA4 use 'CustomConnector' with connector_label 'GoogleAnalytics4'. Native types: 'Salesforce', 'S3', 'Zendesk', etc."
+  description = "Source connector type. Use 'CustomConnector' for third-party connectors with connector_label. Native types: 'Salesforce', 'S3', 'Zendesk', 'Marketo', etc."
   type        = string
   default     = "CustomConnector"
 }
@@ -88,13 +88,13 @@ variable "source_connector_profile_name" {
 }
 
 variable "source_connector_label" {
-  description = "Connector label for CustomConnector type (e.g. 'GoogleAnalytics4'). Required when source_connector_type = 'CustomConnector'."
+  description = "Connector label when using CustomConnector type. Required when source_connector_type = 'CustomConnector'. Leave empty for native connector types."
   type        = string
-  default     = "GoogleAnalytics4"
+  default     = ""
 }
 
 variable "source_object" {
-  description = "Source object identifier (e.g. GA4 property ID, Salesforce object name). For GA4: the property ID like '123456789'."
+  description = "Source object identifier. The value depends on the connector type (e.g. property ID, object name, table name)."
   type        = string
 }
 

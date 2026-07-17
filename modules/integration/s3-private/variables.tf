@@ -21,7 +21,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "service" {
-  description = "Short service / product name used in resource naming. E.g. 'bancamovil', 'pagos'."
+  description = "Short service / product name used in resource naming. E.g. 'payments', 'analytics'."
   type        = string
 
   validation {
@@ -182,7 +182,7 @@ variable "logging_prefix" {
 # ══════════════════════════════════════════════════════════════════════════════
 
 variable "reader_principal_arns" {
-  description = "List of IAM principal ARNs that can READ from the bucket (s3:GetObject, s3:ListBucket). E.g. Stratio user/role ARN."
+  description = "List of IAM principal ARNs that can READ from the bucket (s3:GetObject, s3:ListBucket). E.g. consumer service user/role ARN."
   type        = list(string)
   default     = []
 }

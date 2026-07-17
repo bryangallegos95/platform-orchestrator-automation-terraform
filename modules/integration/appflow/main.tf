@@ -1,24 +1,23 @@
 # modules/integration/appflow/main.tf
 #
-# AWS AppFlow — Flow from source (GA4) to destination (Kinesis Firehose).
+# AWS AppFlow — Flow from source connector to destination (Kinesis Firehose).
 #
 # What this module creates:
-#   1. AppFlow Flow (source connector → Firehose destination)
+#   1. AppFlow Flow (source connector -> Firehose destination)
 #   2. IAM role for AppFlow service (see iam.tf)
-#   3. Flow tasks (field mappings — default: MAP_ALL)
+#   3. Flow tasks (field mappings - default: MAP_ALL)
 #
 # What this module does NOT create:
-#   - Connector Profile (OAuth2 for GA4 must be configured manually in console
-#     or via a separate resource — AppFlow connector profiles for Google services
-#     require interactive OAuth consent that cannot be fully automated via IaC)
+#   - Connector Profile (must be created separately or passed via input.
+#     OAuth-based connectors require interactive authorization)
 #   - Kinesis Firehose stream (input from kinesis-firehose module)
-#   - VPC Endpoint for AppFlow (managed in the centralized services layer)
+#   - VPC Endpoint for AppFlow (not needed - AppFlow is fully managed)
 #
 # NOTE ON CONNECTOR PROFILES:
-#   For GA4, the connector profile includes OAuth2 tokens that require
-#   interactive authorization flow (Google consent screen). The recommended
-#   approach is:
-#     1. Create the connector profile manually in the AWS Console
+#   OAuth-based connectors require interactive authorization flow.
+#   The recommended approach is:
+#     1. Create the connector profile in the son repo wrapper module
+#        with OAuth credentials injected via TF_VAR from a secrets vault
 #     2. Reference it via var.source_connector_profile_name
 #     3. The flow itself is fully managed by Terraform
 
