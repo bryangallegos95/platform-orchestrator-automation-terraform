@@ -47,7 +47,7 @@ resource "terraform_data" "account_guard" {
 
 resource "aws_appflow_flow" "this" {
   name        = local.flow_name
-  description = var.flow_description != "" ? var.flow_description : "AppFlow: ${var.source_connector_type} → Kinesis Firehose (${var.service}-${var.workload}-${var.ambiente})"
+  description = var.flow_description != "" ? var.flow_description : "AppFlow - ${var.source_connector_type} to Kinesis Firehose - ${var.service}-${var.workload}-${var.ambiente}"
 
   # ── Source ────────────────────────────────────────────────────────────────
   source_flow_config {
