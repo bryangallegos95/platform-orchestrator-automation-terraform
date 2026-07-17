@@ -53,6 +53,7 @@ resource "aws_appflow_flow" "this" {
   source_flow_config {
     connector_type         = var.source_connector_type
     connector_profile_name = var.source_connector_profile_name != "" ? var.source_connector_profile_name : local.connector_profile_name
+    api_version            = var.source_connector_type == "CustomConnector" ? "v1" : null
 
     source_connector_properties {
       dynamic "custom_connector" {
