@@ -741,57 +741,55 @@ jobs:
 
           echo "exit_code=$PROWLER_EXIT" >> $GITHUB_OUTPUT
           echo "Prowler IaC scan exit code: $PROWLER_EXIT"
-
       - name: Evaluate scan results
         id: evaluate
         run: |
-          # Parse results directly from Prowler stdout (most reliable source)
-          # Prowler prints a summary table like:
-          #   │ iac │ terraform │ FAIL (1) │ 0 │ 0 │ 0 │ 1 │ 0 │
-          # Columns: Provider | Service | Status | Critical | High | Medium | Low | Muted
-          #
-          # We also count FAIL lines from verbose output as validation:
-          #   FAIL AWS-0143: One or more policies are attached directly to a user
+          # Parse results from Prowler stdout summary table.
+          # The summary line looks like:
+          # | iac | terraform | FAIL (1) | 0 | 0 | 0 | 1 | 0 |
+          # Numbers after FAIL(N): Critical, High, Medium, Low, Muted
 
           PROWLER_OUTPUT="/tmp/prowler-output.txt"
-
-          # Method: parse the summary table row that contains "FAIL"
-          # The table format has Critical, High, Medium columns after the status
           TOTAL_CRIT=0
           TOTAL_HIGH=0
           TOTAL_MED=0
 
           if [ -f "$PROWLER_OUTPUT" ]; then
-            # Extract the FAIL row from the results table
-            # Format: │ iac │ terraform │ FAIL (N) │ Critical │ High │ Medium │ Low │ Muted │
-            FAIL_LINE=$(grep -P "FAIL \(\d+\)" "$PROWLER_OUTPUT" | tail -1 || true)
+            # Find the table line with "FAIL ("
+            FAIL_LINE=$(grep "FAIL (" "$PROWLER_OUTPUT" | grep -v "FAIL AWS\|FAIL AZU\|FAIL GCP\|Color\|Fix" | tail -1 || true)
 
             if [ -n "$FAIL_LINE" ]; then
               echo "Found FAIL summary line: $FAIL_LINE"
-              # Parse numeric columns: the line has pipe-separated values
-              # Extract numbers after "FAIL (N) │"
-              TOTAL_CRIT=$(echo "$FAIL_LINE" | awk -F'│' '{gsub(/[^0-9]/,"",$4); print $4}' 2>/dev/null || echo "0")
-              TOTAL_HIGH=$(echo "$FAIL_LINE" | awk -F'│' '{gsub(/[^0-9]/,"",$5); print $5}' 2>/dev/null || echo "0")
-              TOTAL_MED=$(echo "$FAIL_LINE" | awk -F'│' '{gsub(/[^0-9]/,"",$6); print $6}' 2>/dev/null || echo "0")
+
+              # Extract all integers from the line
+              # Expected: 1 0 0 0 1 0 (FAIL_count Critical High Medium Low Muted)
+              readarray -t NUM_ARRAY < <(echo "$FAIL_LINE" | grep -oP '\d+')
+
+              echo "  All numbers found: ${NUM_ARRAY[*]}"
+              echo "  Count: ${#NUM_ARRAY[@]}"
+
+              # Array: [0]=FAIL_count [1]=Critical [2]=High [3]=Medium [4]=Low [5]=Muted
+              if [ ${#NUM_ARRAY[@]} -ge 4 ]; then
+                TOTAL_CRIT=${NUM_ARRAY[1]}
+                TOTAL_HIGH=${NUM_ARRAY[2]}
+                TOTAL_MED=${NUM_ARRAY[3]}
+              fi
+
+              echo "  Parsed: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED"
             else
-              echo "No FAIL line found in summary table — all checks passed."
+              echo "No FAIL line found in summary table - all checks passed."
             fi
           else
             echo "::warning::Prowler output file not found."
           fi
 
-          # Ensure numeric values (default to 0 if empty)
-          TOTAL_CRIT=${TOTAL_CRIT:-0}
-          TOTAL_HIGH=${TOTAL_HIGH:-0}
-          TOTAL_MED=${TOTAL_MED:-0}
-
-          echo "── Final: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED ──"
+          echo "-- Final: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED --"
           echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
           echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
           echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
 
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⑤ Security Scan (Prowler IaC)
+          ### Security Scan (Prowler IaC)
           | Severity | Count |
           |----------|-------|
           | CRITICAL | $TOTAL_CRIT |
