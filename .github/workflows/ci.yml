@@ -750,26 +750,25 @@ jobs:
           TOTAL_MED=0
 
           # Parse Prowler JSON-OCSF results
-          for f in /tmp/prowler-results/*.json /tmp/prowler-results/**/*.json; do
+          # OCSF format from Prowler 5.x:
+          #   status_id: 1=New (FAIL), 2=Suppressed (MUTED), 99=Other (PASS)
+          #   severity_id: 1=Informational, 2=Low, 3=Medium, 4=High, 5=Critical
+          # File pattern: *.ocsf.json
+          for f in /tmp/prowler-results/*.ocsf.json; do
             [ -f "$f" ] || continue
 
-            # OCSF format: severity_id (1=Info, 2=Low, 3=Medium, 4=High, 5=Critical)
-            CRIT=$(jq '[.[] | select(.severity_id == 5 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
-            HIGH=$(jq '[.[] | select(.severity_id == 4 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
-            MED=$(jq '[.[] | select(.severity_id == 3 and .status == "New")] | length' "$f" 2>/dev/null || echo "0")
+            echo "Parsing: $f"
+            CRIT=$(jq '[.[] | select(.status_id == 1 and .severity_id == 5)] | length' "$f" 2>/dev/null || echo "0")
+            HIGH=$(jq '[.[] | select(.status_id == 1 and .severity_id == 4)] | length' "$f" 2>/dev/null || echo "0")
+            MED=$(jq '[.[] | select(.status_id == 1 and .severity_id == 3)] | length' "$f" 2>/dev/null || echo "0")
 
-            # Fallback: try string-based severity field
-            if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
-              CRIT=$(jq '[.[] | select((.severity == "CRITICAL" or .severity == "critical") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
-              HIGH=$(jq '[.[] | select((.severity == "HIGH" or .severity == "high") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
-              MED=$(jq '[.[] | select((.severity == "MEDIUM" or .severity == "medium") and (.status == "FAIL" or .status == "New"))] | length' "$f" 2>/dev/null || echo "0")
-            fi
-
+            echo "  Critical=$CRIT, High=$HIGH, Medium=$MED"
             TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
             TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
             TOTAL_MED=$((TOTAL_MED + MED))
           done
 
+          echo "── Final: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED ──"
           echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
           echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
           echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
