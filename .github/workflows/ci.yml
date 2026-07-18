@@ -712,12 +712,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Prowler
+      - name: Install Prowler + Trivy
         run: |
-          echo "── Installing Prowler (Python $(python3 --version)) ──"
+          echo "── Installing Prowler + Trivy (IaC scan engine) ──"
           pip install prowler --quiet
           prowler --version
-          echo "✅ Prowler installed."
+
+          # Trivy is required by Prowler IaC provider as the scanning backend
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+          trivy --version
+          echo "✅ Prowler + Trivy installed."
 
       - name: Run Prowler IaC scan
         id: prowler_scan
