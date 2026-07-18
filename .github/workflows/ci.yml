@@ -735,6 +735,7 @@ jobs:
             --scan-path . \
             --output-formats json-ocsf \
             --output-directory /tmp/prowler-results \
+            --no-color \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
           PROWLER_EXIT=$?
           set -e
@@ -745,9 +746,8 @@ jobs:
         id: evaluate
         run: |
           # Parse results from Prowler stdout summary table.
-          # The summary line looks like:
-          # | iac | terraform | FAIL (1) | 0 | 0 | 0 | 1 | 0 |
-          # Numbers after FAIL(N): Critical, High, Medium, Low, Muted
+          # With --no-color, the table line looks like:
+          # | iac        | terraform | FAIL (1) |          0 |      0 |        0 |     1 |       0 |
 
           PROWLER_OUTPUT="/tmp/prowler-output.txt"
           TOTAL_CRIT=0
@@ -755,24 +755,28 @@ jobs:
           TOTAL_MED=0
 
           if [ -f "$PROWLER_OUTPUT" ]; then
-            # Find the table line with "FAIL ("
-            FAIL_LINE=$(grep "FAIL (" "$PROWLER_OUTPUT" | grep -v "FAIL AWS\|FAIL AZU\|FAIL GCP\|Color\|Fix" | tail -1 || true)
+            # Strip any remaining ANSI escape codes
+            CLEAN_OUTPUT=$(sed 's/\x1b\[[0-9;]*m//g' "$PROWLER_OUTPUT")
+
+            # Find the line with "FAIL (" that is the summary table (not individual checks)
+            FAIL_LINE=$(echo "$CLEAN_OUTPUT" | grep "FAIL (" | grep -v "FAIL AWS\|FAIL AZU\|FAIL GCP" | tail -1 || true)
 
             if [ -n "$FAIL_LINE" ]; then
               echo "Found FAIL summary line: $FAIL_LINE"
 
-              # Extract all integers from the line
-              # Expected: 1 0 0 0 1 0 (FAIL_count Critical High Medium Low Muted)
-              readarray -t NUM_ARRAY < <(echo "$FAIL_LINE" | grep -oP '\d+')
+              # Extract the part AFTER "FAIL (N)" — this contains the severity columns
+              AFTER_FAIL=$(echo "$FAIL_LINE" | sed 's/.*FAIL ([0-9]*)//')
+              echo "  After FAIL: $AFTER_FAIL"
 
-              echo "  All numbers found: ${NUM_ARRAY[*]}"
-              echo "  Count: ${#NUM_ARRAY[@]}"
+              # Now extract only digits from this part (should be: Critical High Medium Low Muted)
+              readarray -t NUMS < <(echo "$AFTER_FAIL" | grep -oE '[0-9]+')
 
-              # Array: [0]=FAIL_count [1]=Critical [2]=High [3]=Medium [4]=Low [5]=Muted
-              if [ ${#NUM_ARRAY[@]} -ge 4 ]; then
-                TOTAL_CRIT=${NUM_ARRAY[1]}
-                TOTAL_HIGH=${NUM_ARRAY[2]}
-                TOTAL_MED=${NUM_ARRAY[3]}
+              echo "  Numbers after FAIL: ${NUMS[*]} (count: ${#NUMS[@]})"
+
+              if [ ${#NUMS[@]} -ge 3 ]; then
+                TOTAL_CRIT=${NUMS[0]}
+                TOTAL_HIGH=${NUMS[1]}
+                TOTAL_MED=${NUMS[2]}
               fi
 
               echo "  Parsed: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED"
