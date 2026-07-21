@@ -172,11 +172,6 @@ variable "flow_log_retention_days" {
   }
 }
 
-variable "cloudwatch_kms_key_arn" {
-  description = "ARN of KMS CMK for CloudWatch Log Group encryption. Use the account baseline key (alias/CWLogs). Required for CIS AWS 2.0 / Prowler AWS-0017."
-  type        = string
-}
-
 variable "flow_log_traffic_type" {
   description = "Traffic type to capture in Flow Logs: ALL | ACCEPT | REJECT"
   type        = string
