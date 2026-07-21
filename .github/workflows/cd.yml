@@ -74,16 +74,6 @@ on:
         required: false
         type: string
         default: ""
-      runner_label:
-        description: |
-          Override the runner tag used for self-hosted jobs.
-          Default: uses the environment value (dev/qa/preprod/prod/dr).
-          Use case: repos that deploy all environments from a single account
-          (e.g., hub-networking) can set runner_label=prod to always use
-          the prod runner regardless of the target environment.
-        required: false
-        type: string
-        default: ""
       target_role_name:
         description: "IAM role name to assume in target account."
         required: false
