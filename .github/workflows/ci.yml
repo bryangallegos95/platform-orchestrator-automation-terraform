@@ -22,6 +22,11 @@
 #   preprod  → [self-hosted, terraform, preprod]  → us-east-1
 #   prod     → [self-hosted, terraform, prod]     → us-east-1
 #   dr       → [self-hosted, terraform, dr]       → us-east-2
+#
+# RUNNER OVERRIDE:
+#   If `runner_label` is set, it replaces the environment in the runner tag.
+#   Example: runner_label=prod → always uses [self-hosted, terraform, prod]
+#   Use case: hub-networking (single account, all envs deploy from prod runner).
 
 #----------- Integración BeyondTrust--------------------------------------------
 # FLUJO VALIDADO (4 pasos):
@@ -60,6 +65,18 @@ on:
         description: "OU / product name — root folder in state bucket."
         required: true
         type: string
+
+      # ─── Runner override ─────────────────────────────────────────
+      runner_label:
+        description: |
+          Override the runner tag used for self-hosted jobs.
+          Default: uses the environment value (dev/qa/preprod/prod/dr).
+          Use case: repos that deploy all environments from a single account
+          (e.g., hub-networking) can set runner_label=prod to always use
+          the prod runner regardless of the target environment.
+        required: false
+        type: string
+        default: ""
 
       # ─── Optional inputs ───────────────────────────────────────
       extra_vars:
@@ -208,7 +225,7 @@ jobs:
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve"
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
       environment: ${{ steps.derive.outputs.environment }}
@@ -265,7 +282,7 @@ jobs:
   format:
     name: "① Format"
     needs: resolve
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
       
@@ -285,7 +302,7 @@ jobs:
   lint:
     name: "② Lint"
     needs: resolve
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
@@ -351,7 +368,7 @@ jobs:
   plan:
     name: "③ Plan"
     needs: [resolve, format, lint]
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
@@ -588,7 +605,7 @@ jobs:
     name: "④ Cost"
     needs: [resolve, plan]
     if: needs.plan.outputs.exitcode == '2'
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
@@ -1016,7 +1033,7 @@ jobs:
       needs.plan.result == 'success' &&
       (needs.security.result == 'success' || needs.security.result == 'skipped') &&
       (needs.sast.result == 'success' || needs.sast.result == 'skipped')
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
       pr_number: ${{ steps.pr.outputs.pr_number }}
