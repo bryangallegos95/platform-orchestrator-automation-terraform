@@ -58,6 +58,15 @@ on:
         default: ""
 
       # ─── Optional inputs ───────────────────────────────────────
+      runner_label:
+        description: |
+          Override the runner label used for all CD jobs.
+          Default: uses the environment name (e.g. dev, qa, prod).
+          Set to "prod" for repos like hub-networking that deploy all envs
+          from the prod runner/account.
+        required: false
+        type: string
+        default: ""
       extra_vars:
         description: |
           Space-separated Terraform -var overrides.
@@ -151,7 +160,7 @@ jobs:
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve"
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
       region:    ${{ steps.derive.outputs.region }}
@@ -206,7 +215,7 @@ jobs:
   apply:
     name: "① Apply"
     needs: resolve
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     environment: ${{ inputs.environment }}
 
     outputs:
@@ -465,7 +474,7 @@ jobs:
       needs.apply.outputs.outcome == 'success' &&
       inputs.promote_on_success &&
       inputs.next_environment != ''
-    runs-on: [self-hosted, terraform, "${{ inputs.environment }}"]
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
       issue_number: ${{ steps.create_issue.outputs.issue_number }}
