@@ -58,6 +58,15 @@ on:
         default: ""
 
       # ─── Optional inputs ───────────────────────────────────────
+      runner_label:
+        description: |
+          Override the runner label used for all CD jobs.
+          Default: uses the environment name (e.g. dev, qa, prod).
+          Set to "prod" for repos like hub-networking that deploy all envs
+          from the prod runner/account.
+        required: false
+        type: string
+        default: ""
       extra_vars:
         description: |
           Space-separated Terraform -var overrides.
