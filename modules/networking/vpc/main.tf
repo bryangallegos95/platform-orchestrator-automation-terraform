@@ -224,9 +224,11 @@ resource "aws_route_table_association" "gwlb_b" {
 # ── VPC Flow Logs → CloudWatch ────────────────────────────────────────────────
 
 # CloudWatch Log Group
+# Encrypted with KMS CMK (CIS AWS 2.0 / Prowler AWS-0017)
 resource "aws_cloudwatch_log_group" "flow_logs" {
   name              = local.flow_log_group
   retention_in_days = var.flow_log_retention_days
+  kms_key_id        = var.cloudwatch_kms_key_arn
 
   tags = merge(local.tags, { Name = local.flow_log_group })
 }
