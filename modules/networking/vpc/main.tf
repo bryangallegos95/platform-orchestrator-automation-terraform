@@ -224,9 +224,12 @@ resource "aws_route_table_association" "gwlb_b" {
 # ── VPC Flow Logs → CloudWatch ────────────────────────────────────────────────
 
 # CloudWatch Log Group
+# Encrypted with KMS CMK (CIS AWS 2.0 / Prowler AWS-0017)
+# Uses account baseline key alias/CWLogs resolved via data source.
 resource "aws_cloudwatch_log_group" "flow_logs" {
   name              = local.flow_log_group
   retention_in_days = var.flow_log_retention_days
+  kms_key_id        = data.aws_kms_alias.cwlogs.target_key_arn
 
   tags = merge(local.tags, { Name = local.flow_log_group })
 }
@@ -283,3 +286,9 @@ resource "aws_flow_log" "this" {
 # ── Data sources ──────────────────────────────────────────────────────────────
 # Used to scope the IAM assume-role condition to the target account.
 data "aws_caller_identity" "current" {}
+
+# KMS CMK for CloudWatch Log Group encryption (account baseline key).
+# Satisfies: Prowler AWS-0017 / CIS AWS 2.0
+data "aws_kms_alias" "cwlogs" {
+  name = "alias/CWLogs"
+}
