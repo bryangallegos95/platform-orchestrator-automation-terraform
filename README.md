@@ -191,23 +191,26 @@ Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One mo
 **Creates:**
 - DB subnet group over the discovered BDD-tier subnets (both AZs)
 - Aurora PostgreSQL cluster + instances (map-driven — son repos add readers or change the class without module changes)
-- Cluster + instance parameter groups (TLS forced, pgaudit, slow-query logging)
-- Dedicated Security Group (no inbound by default — 5432 opt-in per consumer)
+- Cluster + instance parameter groups (TLS forced, pgaudit, slow-query logging — **security baseline locked**)
+- Dedicated Security Group (no inbound by default — **15432/tcp** opt-in per consumer)
+- Managed CloudWatch log group for the PostgreSQL export (retention by env + CMK `alias/CWLogs`)
 - Enhanced Monitoring IAM role (prod-like envs)
 - Additive KMS grants for consumer workload roles (`aws_kms_grant` — never touches the key policy)
 
 **Discovery (no IDs passed in, no shared state):**
 - VPC by Name convention: `vpc-aw-{region}-{service}-{ambiente}`
 - BDD subnets by the `Tier=bdd` / `AZ` tags stamped by the VPC module
-- RDS CMK by alias (`kms_key_alias`, default `alias/rds`) — the key **already exists** in every account (account baseline); the module never creates keys
+- RDS CMK by alias (`kms_key_alias`, default `alias/RDS`) + CloudWatch Logs CMK (`alias/CWLogs`) — the keys **already exist** in every account (account baseline); the module never creates keys
 
-**Topology by environment (overridable):**
+**Port:** the cluster listens on **15432** (platform security standard, `🔒 LOCKED`), not the PostgreSQL default 5432. Consumers must target `:15432`.
+
+**Topology by environment:**
 
 | Environment | Default topology |
 |-------------|-----------------|
-| dev / qa / preprod | Single-AZ — 1 writer (`multi_az=null` → auto) |
-| prod | Multi-AZ — writer (AZ-a) + reader (AZ-b), auto-failover |
-| dr | Mirror in us-east-2; opt-in Aurora Global Database replication (`enable_global_database` on prod + `global_cluster_identifier` on dr) |
+| dev / qa / preprod | Single-AZ — 1 writer (may opt UP to multi-AZ) |
+| prod / dr | Multi-AZ — writer (AZ-a) + reader (AZ-b), auto-failover — `🔒 LOCKED` (cannot downgrade) |
+| dr (Global DB) | opt-in Aurora Global Database replication (`enable_global_database` on prod + `global_cluster_identifier` on dr) |
 
 **Compute model (orthogonal to topology):**
 
@@ -215,13 +218,24 @@ Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One mo
 |-------|-----|-------|
 | Provisioned (default) | `instance_class` (default `db.r6g.large`) | Fixed capacity |
 | Serverless v2 | `serverless = true` + `serverless_min_acu` / `serverless_max_acu` | Instances become `db.serverless`; scales in ACUs (1 ACU ≈ 2 GiB) |
-| Serverless v2 + auto-pause | `serverless_min_acu = 0` | Compute cost $0 while idle, ~15s resume. **dev/qa only** — blocked by precondition in preprod/prod/dr. Requires engine 16.3+/15.7+/14.12+/13.15+ |
+| Serverless v2 + auto-pause | `serverless_min_acu = 0` | Compute cost $0 while idle, ~15s resume. **dev/qa only** — blocked by precondition in preprod/prod/dr. Requires engine 16.3+/15.7+/14.12+ (enforced at plan time) |
 
-**Hardening baked in (not configurable off):**
-- Storage encryption with the account CMK, IAM database authentication, `rds.force_ssl=1`
-- Not publicly accessible, PostgreSQL logs → CloudWatch, `copy_tags_to_snapshot`
-- Deletion protection + final snapshot + Enhanced Monitoring auto-enabled in preprod/prod/dr
-- Backup retention auto: 35 days prod/dr, 7 days elsewhere (floor: 7)
+**Hardening contract — 3 layers (see `modules/database/aurora-postgresql/README.md`):**
+
+`🔒 LOCKED` (invariant, identical in every env, a son repo CANNOT change):
+- Storage encryption with the account CMK (`alias/RDS`), IAM database authentication, `rds.force_ssl=1`
+- pgaudit + connection/DDL logging baseline (protected — son overrides of these parameter names are rejected)
+- Not publicly accessible, `allow_major_version_upgrade=false`, `copy_tags_to_snapshot`, port **15432**
+- `engine_version` allow-list (major ≥ 14 — EOL engines rejected)
+
+`🛡️ GUARD-RAIL` (env FLOOR a son repo may RAISE but never LOWER):
+- Multi-AZ (prod/dr), Enhanced Monitoring (prod-like ≥ 60s), `apply_immediately=false` (prod-like)
+- PITR backup retention floor: 35 days prod/dr, 7 elsewhere
+- Deletion protection: locked ON in preprod/prod/dr; default ON in dev/qa (a son repo sets `false` only for ephemeral clusters)
+- Serverless `max_acu` ceiling per env (dev/qa 8, preprod 16, prod/dr 64)
+- CloudWatch log retention: 30d dev/qa · 90d preprod · 365d prod/dr
+
+`🎚️ FREE` (son-repo self-service within the guard rails): ACUs under the ceiling, extra readers, `database_name`, allowed consumers, non-baseline parameters, `storage_type` (FinOps: `aurora-iopt1`), tags.
 
 **Admin service user (day-1/day-2):**
 - `master_username` (default `svcadmin`) is the cluster admin service user
@@ -242,7 +256,7 @@ Aurora PostgreSQL cluster deployed into an existing Spoke VPC (BDD tier). One mo
 | `producto` | string | Mandatory tag |
 | `centro_costo` | string | Mandatory tag |
 
-**Key optional variables:** `engine_version` (default `16.6`), `db_family` (derived from major version), `instance_class` (default `db.r6g.large`), `serverless` / `serverless_min_acu` / `serverless_max_acu` / `serverless_auto_pause_seconds` (Serverless v2), `instances` (explicit topology map), `multi_az`, `allowed_security_group_ids` / `allowed_cidrs` (5432 ingress), `kms_key_alias` / `kms_key_arn`, `kms_consumer_role_arns`, `cluster_parameters` / `instance_parameters` (baseline overrides), `enable_global_database` / `global_cluster_identifier`, `database_name`, `backup_retention_period`, `extra_tags`.
+**Key optional variables:** `engine_version` (default `16.6`, major ≥ 14), `db_family` (derived from major version), `instance_class` (default `db.r6g.large`), `serverless` / `serverless_min_acu` / `serverless_max_acu` / `serverless_auto_pause_seconds` (Serverless v2), `storage_type` (`standard` | `aurora-iopt1` — FinOps), `instances` (explicit topology map), `multi_az` (opt-UP only), `allowed_security_group_ids` / `allowed_cidrs` (15432 ingress), `kms_key_alias` (default `alias/RDS`) / `kms_key_arn`, `cloudwatch_logs_kms_key_alias` (default `alias/CWLogs`) / `cloudwatch_log_retention_days`, `kms_consumer_role_arns`, `cluster_parameters` / `instance_parameters` (non-baseline only), `enable_global_database` / `global_cluster_identifier`, `database_name`, `backup_retention_period` (floor-guarded), `extra_tags`.
 
 **Usage (from son repo's `terragrunt.hcl`):**
 ```hcl
@@ -348,14 +362,16 @@ Son repos pin to a specific version: `?ref=v1.0.0`
     ├── database/
     │   └── aurora-postgresql/
     │       ├── main.tf              # Cluster, instances, subnet group, global DB
-    │       ├── data.tf              # VPC/BDD-subnet/KMS discovery + account guard
+    │       ├── data.tf              # VPC/BDD-subnet/KMS (RDS+CWLogs) discovery
+    │       ├── guards.tf            # terraform_data plan-time guards (account + region)
+    │       ├── logs.tf              # Managed PostgreSQL log group (retention + CMK)
     │       ├── parameter_groups.tf  # Cluster/instance PGs (TLS, pgaudit baseline)
-    │       ├── security_groups.tf   # Dedicated SG (no inbound by default)
+    │       ├── security_groups.tf   # Dedicated SG (no inbound by default, 15432)
     │       ├── iam.tf               # Enhanced Monitoring role
     │       ├── kms.tf               # Additive grants for consumer roles
-    │       ├── variables.tf         # All inputs with validations
-    │       ├── outputs.tf           # Endpoints, resource ID, SG ID, KMS ARN
-    │       ├── locals.tf            # Naming conventions, topology, tags
+    │       ├── variables.tf         # All inputs with validations (hardening contract)
+    │       ├── outputs.tf           # Endpoints, resource ID, SG ID, KMS ARN, log group
+    │       ├── locals.tf            # Naming, LOCKED/GUARD-RAIL contract, tags
     │       └── versions.tf          # Provider constraints
     └── networking/
         └── vpc/

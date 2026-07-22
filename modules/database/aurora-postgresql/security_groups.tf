@@ -7,7 +7,7 @@
 #   - var.allowed_security_group_ids → SG-to-SG rules (preferred: identity of
 #     the consumer, not its network location)
 #   - var.allowed_cidrs              → CIDR rules (e.g. app-tier subnets)
-# Both open ONLY port 5432 — the port is not configurable at the SG level.
+# Both open ONLY the platform DB port (15432) — not configurable at the SG level.
 #
 # Uses the modern aws_vpc_security_group_ingress_rule / _egress_rule resources
 # (AWS provider >= 5.x) rather than inline blocks, which enables independent
@@ -15,7 +15,7 @@
 
 resource "aws_security_group" "this" {
   name        = local.sg_name
-  description = "SG for ${local.cluster_name}. Default: no inbound. 5432/tcp opt-in per consumer. Managed by Terraform (database/aurora-postgresql module)."
+  description = "SG for ${local.cluster_name}. Default: no inbound. ${local.db_port}/tcp opt-in per consumer. Managed by Terraform (database/aurora-postgresql module)."
   vpc_id      = data.aws_vpc.spoke.id
 
   tags = merge(local.tags, { Name = local.sg_name })
@@ -26,10 +26,10 @@ resource "aws_vpc_security_group_ingress_rule" "from_sg" {
   for_each = toset(var.allowed_security_group_ids)
 
   security_group_id            = aws_security_group.this.id
-  description                  = "PostgreSQL from consumer SG ${each.value}"
+  description                  = "PostgreSQL (${local.db_port}) from consumer SG ${each.value}"
   referenced_security_group_id = each.value
-  from_port                    = 5432
-  to_port                      = 5432
+  from_port                    = local.db_port
+  to_port                      = local.db_port
   ip_protocol                  = "tcp"
 
   tags = merge(local.tags, {
@@ -46,8 +46,8 @@ resource "aws_vpc_security_group_ingress_rule" "from_cidr" {
   security_group_id = aws_security_group.this.id
   description       = each.value.description
   cidr_ipv4         = each.value.cidr
-  from_port         = 5432
-  to_port           = 5432
+  from_port         = local.db_port
+  to_port           = local.db_port
   ip_protocol       = "tcp"
 
   tags = merge(local.tags, {

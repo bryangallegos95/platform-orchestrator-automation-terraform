@@ -30,7 +30,7 @@ output "reader_endpoint" {
 }
 
 output "port" {
-  description = "Port the cluster listens on (5432)."
+  description = "Port the cluster listens on (platform standard: 15432). Consumers must target this port."
   value       = aws_rds_cluster.this.port
 }
 
@@ -71,6 +71,23 @@ output "security_group_id" {
 output "kms_key_arn" {
   description = "ARN of the pre-existing RDS CMK the cluster storage is encrypted with (discovered by alias or passed in)."
   value       = local.kms_key_arn
+}
+
+# ── Observability / logs ──────────────────────────────────────────────────────
+output "cloudwatch_log_group_name" {
+  description = "Name of the managed PostgreSQL CloudWatch log group (retention + CMK-encrypted)."
+  value       = aws_cloudwatch_log_group.postgresql.name
+}
+
+output "cloudwatch_log_group_arn" {
+  description = "ARN of the managed PostgreSQL CloudWatch log group."
+  value       = aws_cloudwatch_log_group.postgresql.arn
+}
+
+# ── Storage model ─────────────────────────────────────────────────────────────
+output "storage_type" {
+  description = "Effective Aurora storage model ('standard' or 'aurora-iopt1')."
+  value       = var.storage_type
 }
 
 # ── Parameter groups ──────────────────────────────────────────────────────────

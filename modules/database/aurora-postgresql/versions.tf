@@ -12,9 +12,7 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0.0, < 6.0.0"
     }
-    null = {
-      source  = "hashicorp/null"
-      version = ">= 3.0.0"
-    }
+    # terraform_data (built-in) replaces the previous null_resource guard —
+    # no external provider needed. Requires Terraform >= 1.4 (satisfied above).
   }
 }
