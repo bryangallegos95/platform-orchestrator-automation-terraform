@@ -15,8 +15,12 @@
 
 resource "aws_security_group" "this" {
   name        = local.sg_name
-  description = "SG for ${local.cluster_name}. Default: no inbound. ${local.db_port}/tcp opt-in per consumer. Managed by Terraform (database/aurora-postgresql module)."
+  description = "SG for ${local.cluster_name}. Default: no inbound. PostgreSQL opt-in per consumer. Managed by Terraform (database/aurora-postgresql module)."
   vpc_id      = data.aws_vpc.spoke.id
+
+  lifecycle {
+    ignore_changes = [description]
+  }
 
   tags = merge(local.tags, { Name = local.sg_name })
 }
