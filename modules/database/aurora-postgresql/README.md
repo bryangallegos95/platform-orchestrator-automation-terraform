@@ -4,7 +4,7 @@ Cluster **Aurora PostgreSQL** hardenizado, desplegado dentro de una Spoke VPC
 existente (tier BDD) del modelo Hub-and-Spoke. Una llamada al módulo = un
 cluster. Pensado para consumo **self-service** desde repos hijos (scaffolds de
 Port.io): el repo hijo sólo pasa configuración; **los controles críticos están
-bloqueados en el módulo central y no se pueden degradar**.
+bloqueados en el módulo central y no se pueden degradar**
 
 > Contrato de plataforma: el desarrollador ajusta *lo que es suyo* (tamaño,
 > consumidores, base de datos, tags) dentro de rieles; la postura de seguridad
