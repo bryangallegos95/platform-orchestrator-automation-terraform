@@ -20,7 +20,7 @@
 #   2. Aurora PostgreSQL cluster encrypted with the account's EXISTING RDS CMK
 #   3. Cluster instances (map-driven — son repos add/resize instances)
 #   4. Cluster + instance parameter groups (TLS forced, audit logging)
-#   5. Dedicated Security Group (no inbound by default — opt-in 5432 rules)
+#   5. Dedicated Security Group (no inbound by default — opt-in 15432 rules)
 #   6. Enhanced Monitoring IAM role (prod-like envs)
 #   7. Additive KMS grants for consumer workload roles (lambda/ecs/etc.)
 #
@@ -54,7 +54,7 @@ resource "aws_rds_cluster" "this" {
   cluster_identifier = local.cluster_name
   engine             = "aurora-postgresql"
   engine_version     = var.engine_version
-  port               = 5432
+  port               = local.db_port # 🔒 LOCKED — 15432 (platform security standard)
 
   # Global-secondary clusters (dr) inherit credentials/database from the
   # primary — defining them is an API error.
@@ -85,6 +85,11 @@ resource "aws_rds_cluster" "this" {
   # ── Encryption — always on, always the account's existing RDS CMK ─────────
   storage_encrypted = true
   kms_key_id        = local.kms_key_arn
+
+  # ── FinOps: storage model (standard vs Aurora I/O-Optimized) ──────────────
+  # null = provider default (standard). "aurora-iopt1" caps and flattens I/O
+  # cost for I/O-heavy workloads. Opt-in via var.storage_type.
+  storage_type = local.storage_type_effective
 
   # ── AuthN hardening ───────────────────────────────────────────────────────
   # IAM DB auth lets workloads (lambda/ecs/eks) connect with rds-db:connect
@@ -133,9 +138,35 @@ resource "aws_rds_cluster" "this" {
       condition     = !(var.serverless && var.serverless_min_acu == 0 && local.is_prod_like)
       error_message = "serverless_min_acu = 0 (auto-pause) is not allowed in preprod/prod/dr — set a floor of at least 0.5 ACU."
     }
+
+    # 🛡️ FinOps guard rail: the serverless ceiling cannot exceed the
+    # per-environment cap (prevents a runaway cost ceiling, e.g. 256 ACU in dev).
+    precondition {
+      condition     = !var.serverless || var.serverless_max_acu <= local.serverless_max_acu_ceiling
+      error_message = "serverless_max_acu (${var.serverless_max_acu}) exceeds the ${var.ambiente} ceiling of ${local.serverless_max_acu_ceiling} ACU. Raise the ceiling in the module (locals.serverless_max_acu_ceiling) if the workload truly needs it."
+    }
+
+    # Auto-pause (min_acu = 0) requires a recent engine — fail at PLAN instead
+    # of a late apply-time API error. Minima: 16.3 / 15.7 / 14.12.
+    precondition {
+      condition = !(var.serverless && var.serverless_min_acu == 0) || (
+        local.engine_major > 16 ||
+        (local.engine_major == 16 && local.engine_minor >= 3) ||
+        (local.engine_major == 15 && local.engine_minor >= 7) ||
+        (local.engine_major == 14 && local.engine_minor >= 12)
+      )
+      error_message = "serverless_min_acu = 0 (auto-pause) requires engine >= 16.3 / 15.7 / 14.12. Current engine_version is ${var.engine_version}."
+    }
+
+    # 🛡️ Reliability guard rail: prod/dr must physically span both AZs. Catches
+    # a var.instances override that accidentally pins every instance to one AZ.
+    precondition {
+      condition     = !contains(["prod", "dr"], var.ambiente) || local.instance_az_count >= 2
+      error_message = "prod/dr must span both AZs (a and b). The current instances map only spans ${local.instance_az_count} AZ. Provide a reader in the other AZ."
+    }
   }
 
-  depends_on = [null_resource.account_guard]
+  depends_on = [terraform_data.guards, aws_cloudwatch_log_group.postgresql]
 }
 
 # ── Cluster instances ─────────────────────────────────────────────────────────

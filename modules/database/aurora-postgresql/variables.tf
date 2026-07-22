@@ -68,6 +68,13 @@ variable "engine_version" {
     condition     = can(regex("^[0-9]+\\.[0-9]+$", var.engine_version))
     error_message = "engine_version must be MAJOR.MINOR (e.g. '16.6')."
   }
+
+  # Allow-list guard: reject EOL / unapproved majors (13.x and older). Approved
+  # Aurora PostgreSQL majors for the platform are 14, 15 and 16.
+  validation {
+    condition     = can(tonumber(split(".", var.engine_version)[0])) && tonumber(split(".", var.engine_version)[0]) >= 14
+    error_message = "engine_version major must be >= 14 (13.x and older are EOL / not approved). Approved majors: 14, 15, 16."
+  }
 }
 
 variable "db_family" {
@@ -131,6 +138,18 @@ variable "instance_class" {
   validation {
     condition     = can(regex("^db\\.serverless$|^db\\.[a-z0-9]+\\.[a-z0-9]+$", var.instance_class))
     error_message = "instance_class must be a valid RDS instance class (e.g. db.r6g.large) or db.serverless."
+  }
+}
+
+# ── FinOps: storage model ─────────────────────────────────────────────────────
+variable "storage_type" {
+  description = "Aurora storage model: 'standard' (default, pay-per-request I/O) or 'aurora-iopt1' (I/O-Optimized — flat, predictable I/O cost; cheaper for I/O-heavy workloads above ~25% I/O spend)."
+  type        = string
+  default     = "standard"
+
+  validation {
+    condition     = contains(["standard", "aurora-iopt1"], var.storage_type)
+    error_message = "storage_type must be 'standard' or 'aurora-iopt1'."
   }
 }
 
@@ -221,9 +240,9 @@ variable "global_cluster_identifier" {
 
 # ── KMS (existing account CMK for RDS) ────────────────────────────────────────
 variable "kms_key_alias" {
-  description = "Alias of the account's pre-existing RDS CMK, discovered at plan time. The module NEVER creates keys."
+  description = "Alias of the account's pre-existing RDS CMK, discovered at plan time. The module NEVER creates keys. Canonical account baseline alias is 'alias/RDS' (case-sensitive)."
   type        = string
-  default     = "alias/rds"
+  default     = "alias/RDS"
 
   validation {
     condition     = can(regex("^alias/", var.kms_key_alias))
@@ -239,6 +258,28 @@ variable "kms_key_arn" {
   validation {
     condition     = var.kms_key_arn == "" || can(regex("^arn:aws:kms:", var.kms_key_arn))
     error_message = "kms_key_arn must be empty or a valid KMS key ARN."
+  }
+}
+
+variable "cloudwatch_logs_kms_key_alias" {
+  description = "Alias of the account's pre-existing CloudWatch Logs CMK, used to encrypt the managed PostgreSQL log group. Canonical account baseline alias is 'alias/CWLogs' (case-sensitive)."
+  type        = string
+  default     = "alias/CWLogs"
+
+  validation {
+    condition     = can(regex("^alias/", var.cloudwatch_logs_kms_key_alias))
+    error_message = "cloudwatch_logs_kms_key_alias must start with 'alias/'."
+  }
+}
+
+variable "cloudwatch_logs_kms_key_arn" {
+  description = "Explicit CloudWatch Logs KMS key ARN override. \"\" (empty) => discover by cloudwatch_logs_kms_key_alias."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.cloudwatch_logs_kms_key_arn == "" || can(regex("^arn:aws:kms:", var.cloudwatch_logs_kms_key_arn))
+    error_message = "cloudwatch_logs_kms_key_arn must be empty or a valid KMS key ARN."
   }
 }
 
@@ -263,7 +304,7 @@ variable "kms_consumer_role_arns" {
 
 # ── Network access (default: no inbound) ──────────────────────────────────────
 variable "allowed_security_group_ids" {
-  description = "Consumer Security Group IDs granted 5432/tcp (preferred over CIDRs — grants by workload identity). Default [] = no inbound."
+  description = "Consumer Security Group IDs granted 15432/tcp (preferred over CIDRs — grants by workload identity). Default [] = no inbound."
   type        = list(string)
   default     = []
 
@@ -275,7 +316,7 @@ variable "allowed_security_group_ids" {
 
 variable "allowed_cidrs" {
   description = <<-EOT
-    CIDR blocks granted 5432/tcp (e.g. app-tier subnets). Default [] = no inbound.
+    CIDR blocks granted 15432/tcp (e.g. app-tier subnets). Default [] = no inbound.
 
     Example:
       [{ description = "App tier subnets", cidr = "10.10.0.0/24" }]
@@ -369,6 +410,17 @@ variable "ca_cert_identifier" {
   default     = "rds-ca-rsa2048-g1"
 }
 
+variable "cloudwatch_log_retention_days" {
+  description = "Retention (days) for the managed PostgreSQL CloudWatch log group. null = auto by environment: 30 (dev/qa), 90 (preprod), 365 (prod/dr). A son repo may set a longer value."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.cloudwatch_log_retention_days == null || contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.cloudwatch_log_retention_days)
+    error_message = "cloudwatch_log_retention_days must be null or a valid CloudWatch Logs retention value (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653)."
+  }
+}
+
 # ── Parameter overrides (son-repo tuning) ─────────────────────────────────────
 variable "cluster_parameters" {
   description = <<-EOT
@@ -390,6 +442,23 @@ variable "cluster_parameters" {
   validation {
     condition     = alltrue([for p in var.cluster_parameters : contains(["immediate", "pending-reboot"], coalesce(p.apply_method, "immediate"))])
     error_message = "Every cluster_parameters[].apply_method must be 'immediate' or 'pending-reboot'."
+  }
+
+  # 🔒 LOCKED — the security/audit baseline cannot be overridden by son repos.
+  # (Defense in depth: locals.tf also merges the baseline LAST so it wins.)
+  validation {
+    condition = alltrue([
+      for p in var.cluster_parameters : !contains([
+        "rds.force_ssl",
+        "log_connections",
+        "log_disconnections",
+        "log_statement",
+        "log_min_duration_statement",
+        "shared_preload_libraries",
+        "pgaudit.log",
+      ], p.name)
+    ])
+    error_message = "These security-baseline parameters are LOCKED and cannot be overridden: rds.force_ssl, log_connections, log_disconnections, log_statement, log_min_duration_statement, shared_preload_libraries, pgaudit.log. Add only non-baseline parameters (e.g. max_connections, work_mem)."
   }
 }
 
@@ -419,6 +488,11 @@ variable "aplicacion" {
     condition     = length(trimspace(var.aplicacion)) > 0
     error_message = "aplicacion (mandatory tag) must not be empty."
   }
+
+  validation {
+    condition     = !can(regex("[<>]|(?i)(xxxx|placeholder|tbd|changeme)", var.aplicacion))
+    error_message = "aplicacion still holds a placeholder value (<...>, XXXX, PLACEHOLDER, TBD, CHANGEME). Set the real value before deploying."
+  }
 }
 
 variable "propietario_recurso" {
@@ -428,6 +502,11 @@ variable "propietario_recurso" {
   validation {
     condition     = length(trimspace(var.propietario_recurso)) > 0
     error_message = "propietario_recurso (mandatory tag) must not be empty."
+  }
+
+  validation {
+    condition     = !can(regex("[<>]|(?i)(xxxx|placeholder|tbd|changeme)", var.propietario_recurso))
+    error_message = "propietario_recurso still holds a placeholder value (<...>, XXXX, PLACEHOLDER, TBD, CHANGEME). Set the real value before deploying."
   }
 }
 
@@ -439,6 +518,11 @@ variable "producto" {
     condition     = length(trimspace(var.producto)) > 0
     error_message = "producto (mandatory tag) must not be empty."
   }
+
+  validation {
+    condition     = !can(regex("[<>]|(?i)(xxxx|placeholder|tbd|changeme)", var.producto))
+    error_message = "producto still holds a placeholder value (<...>, XXXX, PLACEHOLDER, TBD, CHANGEME). Set the real value before deploying."
+  }
 }
 
 variable "centro_costo" {
@@ -448,6 +532,11 @@ variable "centro_costo" {
   validation {
     condition     = length(trimspace(var.centro_costo)) > 0
     error_message = "centro_costo (mandatory tag) must not be empty."
+  }
+
+  validation {
+    condition     = !can(regex("[<>]|(?i)(xxxx|placeholder|tbd|changeme)", var.centro_costo))
+    error_message = "centro_costo still holds a placeholder value (<...>, XXXX, PLACEHOLDER, TBD, CHANGEME). Set the real cost center before deploying."
   }
 }
 

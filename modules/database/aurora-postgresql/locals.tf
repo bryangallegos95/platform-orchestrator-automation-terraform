@@ -1,7 +1,18 @@
 # modules/database/aurora-postgresql/locals.tf
 #
-# Centralised naming convention and tag factory — mirrors the EC2/VPC modules.
+# Centralised naming convention, HARDENING CONTRACT and tag factory.
 # ALL resource names are derived from here — never hardcoded in main.tf.
+#
+# HARDENING CONTRACT (why this file looks the way it does):
+#   🔒 LOCKED     — security invariants, identical in every environment, NOT
+#                   overridable by son repos (cifrado, force_ssl, pgaudit/logging
+#                   baseline, IAM auth, no public access, port 15432).
+#   🛡️ GUARD-RAIL — protective controls with an environment FLOOR that a son
+#                   repo may RAISE but never LOWER (deletion protection,
+#                   PITR retention, Enhanced Monitoring, multi-AZ, apply timing,
+#                   serverless ACU ceiling).
+#   🎚️ FREE       — son-repo self-service within the guard rails (ACUs under the
+#                   ceiling, extra readers, non-security parameters, tags...).
 #
 # Naming pattern reference:
 #   Cluster        : rds-aw-{region_short}-{service}-{workload}-{ambiente}
@@ -30,19 +41,48 @@ locals {
   monitoring_role_name = "iam-role-aw-${local.region_short}-${var.service}-${var.workload}-rds-monitoring-${var.ambiente}"
   global_cluster_name  = "gdb-aw-${var.service}-${var.workload}"
 
+  # 🔒 LOCKED — engine port. Security standard: 15432 (not the default 5432).
+  # Applied to the cluster AND the Security Group ingress rules. Not exposed
+  # to son repos — the platform owns the listening port.
+  db_port = 15432
+
   # ── KMS resolution ────────────────────────────────────────────────────────
-  # Explicit ARN wins; otherwise resolve the account's pre-existing RDS CMK
-  # by alias (see data.tf). The module never creates keys.
-  kms_key_arn = var.kms_key_arn != "" ? var.kms_key_arn : data.aws_kms_alias.rds[0].target_key_arn
+  # Explicit ARN wins; otherwise resolve the account's pre-existing CMK by
+  # alias (see data.tf). The module never creates keys.
+  kms_key_arn                 = var.kms_key_arn != "" ? var.kms_key_arn : data.aws_kms_alias.rds[0].target_key_arn
+  cloudwatch_logs_kms_key_arn = var.cloudwatch_logs_kms_key_arn != "" ? var.cloudwatch_logs_kms_key_arn : data.aws_kms_alias.cwlogs[0].target_key_arn
+
+  # ── Managed PostgreSQL log group (see logs.tf) ───────────────────────────
+  postgresql_log_group_name = "/aws/rds/cluster/${local.cluster_name}/postgresql"
+  # 🛡️ GUARD-RAIL — retention floor by environment; a son repo may set a longer
+  # retention but the module keeps the environment default when unset.
+  default_log_retention_days = contains(["prod", "dr"], var.ambiente) ? 365 : (var.ambiente == "preprod" ? 90 : 30)
+  log_retention_days         = coalesce(var.cloudwatch_log_retention_days, local.default_log_retention_days)
 
   # ── Environment posture ───────────────────────────────────────────────────
-  # prod-like environments get the protective defaults automatically.
+  # prod-like environments get the protective controls automatically.
   is_prod_like = contains(["preprod", "prod", "dr"], var.ambiente)
 
-  # ── Topology: single-AZ (noprod) vs multi-AZ (prod/dr) ────────────────────
-  # Explicit input wins; null = auto → writer+reader across AZs in prod/dr,
-  # single writer everywhere else.
-  multi_az = var.multi_az != null ? var.multi_az : contains(["prod", "dr"], var.ambiente)
+  # ── 🛡️ Topology: single-AZ (noprod) vs multi-AZ (prod/dr) — LOCKED in prod/dr
+  # prod/dr are ALWAYS multi-AZ (a son repo cannot downgrade to single-AZ).
+  # Elsewhere the son repo may opt UP to multi-AZ (default single).
+  multi_az = contains(["prod", "dr"], var.ambiente) ? true : coalesce(var.multi_az, false)
+
+  # ── 🎚️ FinOps: storage model + serverless ACU ceiling ────────────────────
+  # I/O-Optimized is opt-in; "standard" maps to the provider default (null) to
+  # avoid a perpetual diff.
+  storage_type_effective = var.storage_type == "aurora-iopt1" ? "aurora-iopt1" : null
+
+  # 🛡️ GUARD-RAIL — per-environment ceiling on serverless_max_acu. Prevents a
+  # runaway cost ceiling (e.g. 256 ACU in dev). Enforced by a precondition in
+  # main.tf.
+  serverless_max_acu_ceiling = {
+    dev     = 8
+    qa      = 8
+    preprod = 16
+    prod    = 64
+    dr      = 64
+  }[var.ambiente]
 
   # Serverless v2: every instance defaults to db.serverless and the cluster
   # gets a serverlessv2_scaling_configuration block (see main.tf). Mixed
@@ -69,6 +109,10 @@ locals {
     }
   }
 
+  # Number of distinct AZs the effective topology spans (used by the prod
+  # multi-AZ precondition in main.tf).
+  instance_az_count = length(distinct([for k, v in local.instances : v.az]))
+
   # AZ selector → discovered subnet's AZ name (physical placement).
   az_name_by_selector = {
     a = data.aws_subnet.bdd_a.availability_zone
@@ -80,44 +124,54 @@ locals {
   # master credentials or database name (inherited from the primary).
   is_global_secondary = var.global_cluster_identifier != ""
 
-  # ── Protective defaults (explicit input wins; null = auto) ───────────────
-  deletion_protection = (
-    var.deletion_protection != null
-    ? var.deletion_protection
-    : local.is_prod_like
-  )
+  # ── 🛡️ Protective controls — LOCKED in prod-like, guard-railed elsewhere ──
+  #
+  # deletion_protection:
+  #   preprod/prod/dr → ALWAYS on (a son repo cannot disable it).
+  #   dev/qa          → default ON (protects "official" dev/qa from accidental
+  #                     teardown / lost work); a son repo can set it to false
+  #                     for genuinely EPHEMERAL clusters.
+  deletion_protection = local.is_prod_like ? true : coalesce(var.deletion_protection, true)
 
-  backup_retention_period = (
-    var.backup_retention_period != null
-    ? var.backup_retention_period
-    : (contains(["prod", "dr"], var.ambiente) ? 35 : 7)
-  )
+  # backup_retention_period (PITR):
+  #   Floor of 35 days in prod/dr, 7 days elsewhere. A son repo may RAISE it
+  #   (up to the Aurora max of 35) but never below the floor.
+  backup_retention_floor  = contains(["prod", "dr"], var.ambiente) ? 35 : 7
+  backup_retention_period = max(local.backup_retention_floor, coalesce(var.backup_retention_period, local.backup_retention_floor))
 
-  # Enhanced Monitoring: 60s granularity in prod-like envs, off in dev/qa.
+  # Enhanced Monitoring:
+  #   prod-like → ALWAYS on (>= 60s; a son repo cannot disable it, but may pick
+  #   a finer granularity). dev/qa → off unless the son repo opts in.
   monitoring_interval = (
-    var.monitoring_interval != null
-    ? var.monitoring_interval
-    : (local.is_prod_like ? 60 : 0)
+    local.is_prod_like
+    ? (coalesce(var.monitoring_interval, 60) == 0 ? 60 : coalesce(var.monitoring_interval, 60))
+    : coalesce(var.monitoring_interval, 0)
   )
 
-  # dev/qa apply changes immediately; prod-like waits for maintenance window.
-  apply_immediately = (
-    var.apply_immediately != null
-    ? var.apply_immediately
-    : !local.is_prod_like
-  )
+  # apply_immediately:
+  #   prod-like → ALWAYS false (changes wait for the maintenance window — change
+  #   control). dev/qa → true unless overridden.
+  apply_immediately = local.is_prod_like ? false : coalesce(var.apply_immediately, true)
 
   # ── Engine / parameter-group family ───────────────────────────────────────
+  # Major/minor parsed once — used by the family derivation and the auto-pause
+  # engine-floor precondition (main.tf).
+  engine_major = tonumber(split(".", var.engine_version)[0])
+  engine_minor = tonumber(split(".", var.engine_version)[1])
+
   # Family derived from the engine major version unless explicitly overridden
   # (son repos can change family + version together via inputs).
   db_family = (
     var.db_family != ""
     ? var.db_family
-    : "aurora-postgresql${split(".", var.engine_version)[0]}"
+    : "aurora-postgresql${local.engine_major}"
   )
 
-  # ── Parameter factory (CIS/security baseline + son-repo overrides) ───────
-  # Son-repo entries win over the baseline on name collision.
+  # ── 🔒 Parameter factory — security baseline is LOCKED ────────────────────
+  # These parameter names are the security/audit baseline. They are:
+  #   1. rejected if a son repo tries to set them (validation in variables.tf), and
+  #   2. merged LAST below, so the baseline wins even if (1) is ever bypassed.
+  # Son repos may still ADD non-protected parameters (work_mem, max_connections…).
   base_cluster_parameters = {
     "rds.force_ssl"              = { value = "1", apply_method = "immediate" }
     "log_connections"            = { value = "1", apply_method = "immediate" }
@@ -128,9 +182,14 @@ locals {
     "pgaudit.log"                = { value = "ddl,role", apply_method = "immediate" }
   }
 
+  # Names a son repo is NOT allowed to override (referenced by the validation
+  # in variables.tf).
+  protected_parameter_names = keys(local.base_cluster_parameters)
+
+  # Son params first, security baseline LAST → baseline always wins.
   cluster_parameters = merge(
-    local.base_cluster_parameters,
-    { for p in var.cluster_parameters : p.name => { value = p.value, apply_method = p.apply_method } }
+    { for p in var.cluster_parameters : p.name => { value = p.value, apply_method = p.apply_method } },
+    local.base_cluster_parameters
   )
 
   instance_parameters = {

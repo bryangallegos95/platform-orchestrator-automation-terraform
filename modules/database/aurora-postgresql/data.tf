@@ -2,18 +2,23 @@
 #
 # VPC + subnet + KMS discovery — finds the Spoke VPC by Name convention, the
 # BDD-tier subnets by the Tier/AZ tag contract the VPC module stamps, and the
-# account's pre-existing RDS CMK by alias.
+# account's pre-existing CMKs by alias (RDS storage + CloudWatch Logs).
 # NO VPC/subnet/key IDs passed in; NO shared state.
 #
 # Discovery contract (modules/networking/vpc):
 #   VPC    : tag Name = vpc-aw-{region_short}-{service}-{ambiente}
 #   Subnet : tag Tier = bdd  +  tag AZ = a|b  (within that VPC)
 #
-# KMS contract (account baseline):
-#   The RDS CMK already exists in every account — resolved by alias
-#   (var.kms_key_alias, default alias/rds). Pass kms_key_arn to override.
+# KMS contract (account baseline — the module NEVER creates keys):
+#   RDS storage / Performance Insights : alias/RDS    (var.kms_key_alias)
+#   CloudWatch Logs (postgresql export): alias/CWLogs  (var.cloudwatch_logs_kms_key_alias)
+#   Pass the matching *_kms_key_arn override to bypass alias discovery.
 
 data "aws_caller_identity" "current" {}
+
+# Active region — cross-checked against var.aws_region by the guards
+# (terraform_data.guards) to catch a provider/region mismatch.
+data "aws_region" "current" {}
 
 # The Spoke VPC that owns the BDD subnets (by Name convention).
 data "aws_vpc" "spoke" {
@@ -63,13 +68,10 @@ data "aws_kms_alias" "rds" {
   name = var.kms_key_alias
 }
 
-# Guardrail: the workflow-provided account must match the active account, else
-# the VPC/subnet/KMS lookups would silently target the wrong account.
-resource "null_resource" "account_guard" {
-  lifecycle {
-    precondition {
-      condition     = data.aws_caller_identity.current.account_id == var.aws_account_id
-      error_message = "aws_account_id (${var.aws_account_id}) != active account (${data.aws_caller_identity.current.account_id}). Cluster and discovered VPC/KMS must be in the SAME account."
-    }
-  }
+# Pre-existing account CloudWatch Logs CMK — encrypts the managed PostgreSQL
+# log group (see logs.tf). Resolved by alias unless an explicit ARN is supplied.
+data "aws_kms_alias" "cwlogs" {
+  count = var.cloudwatch_logs_kms_key_arn == "" ? 1 : 0
+
+  name = var.cloudwatch_logs_kms_key_alias
 }
