@@ -416,7 +416,7 @@ variable "cloudwatch_log_retention_days" {
   default     = null
 
   validation {
-    condition     = var.cloudwatch_log_retention_days == null || contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.cloudwatch_log_retention_days)
+    condition     = var.cloudwatch_log_retention_days == null ? true : contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.cloudwatch_log_retention_days)
     error_message = "cloudwatch_log_retention_days must be null or a valid CloudWatch Logs retention value (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653)."
   }
 }
