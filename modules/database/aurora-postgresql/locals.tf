@@ -124,6 +124,20 @@ locals {
   # master credentials or database name (inherited from the primary).
   is_global_secondary = var.global_cluster_identifier != ""
 
+  # Cross-account Global Database: when source_account_id is set, the
+  # global_cluster_identifier must be an ARN (not just the identifier name)
+  # because AWS requires ARN format for cross-account membership.
+  # Same-account: just the identifier name suffices.
+  effective_global_cluster_identifier = (
+    local.is_global_secondary
+    ? (
+      var.source_account_id != ""
+      ? "arn:aws:rds::${var.source_account_id}:global-cluster:${var.global_cluster_identifier}"
+      : var.global_cluster_identifier
+    )
+    : null
+  )
+
   # ── 🛡️ Protective controls — LOCKED in prod-like, guard-railed elsewhere ──
   #
   # deletion_protection:
