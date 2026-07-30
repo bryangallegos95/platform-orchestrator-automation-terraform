@@ -8,7 +8,7 @@ ElastiCache, and IRSA roles for containerized microservices on ROSA HCP.
 ## Architecture Context
 
 ```
-PROD (us-east-1)                        DR (us-east-2)
+PROD (us-east-1, account 761018868392)   DR (us-east-2, account 065908811516)
 ┌──────────────────────┐                ┌──────────────────────┐
 │  Aurora (primary)     │───Global DB───▶│  Aurora (secondary)   │
 │  SQS queues (active)  │                │  SQS queues (standby) │
@@ -20,6 +20,10 @@ PROD (us-east-1)                        DR (us-east-2)
     ROSA HCP (prod)                          ROSA HCP (dr)
     Cluster: biz-prod                        Cluster: biz-dr
 ```
+
+**Important**: DR uses a SEPARATE AWS account (`065908811516`) from production
+(`761018868392`). This is a security and regulatory requirement — full blast
+radius isolation between prod and DR.
 
 ## DR Model: Warm Standby
 
@@ -46,11 +50,12 @@ The infrastructure is already in place.
 - Replication is at the storage level — no binlog, no logical replication
 - The secondary cluster in DR is fully functional for reads immediately
 
-**Cross-account support** (when DR uses a different AWS account):
-- Set `source_account_id` to the PROD account ID in the DR environment config
+**Cross-account support** (DR uses account `065908811516`, different from prod `761018868392`):
+- Set `source_account_id = "761018868392"` (prod account) in the DR environment config
 - The module constructs the Global Cluster ARN for cross-account membership
 - Prerequisite: the primary account must authorize the DR account via the RDS
   console → Global Database → "Add AWS accounts" or via API
+- The DR account must have its own CMK (`alias/RDS`) in us-east-2 for re-encryption
 
 **Failover procedure**:
 ```bash
@@ -76,8 +81,8 @@ inputs = {
 # environments/dr/aurora/terragrunt.hcl
 inputs = {
   global_cluster_identifier = "gdb-aw-negocio-core"
-  # Only needed if DR account differs from PROD account:
-  # source_account_id = "761018868392"
+  # DR is a DIFFERENT account — must reference prod account for Global DB
+  source_account_id = "761018868392"
   aws_region = "us-east-2"
   # ... other DR inputs (same as prod for engine, tags)
 }
@@ -193,13 +198,14 @@ inputs = {
   # OIDC from the DR ROSA cluster (different from prod!)
   oidc_issuer_url = "rh-oidc.s3.us-east-1.amazonaws.com/<dr-cluster-oidc-id>"
   aws_region      = "us-east-2"
+  aws_account_id  = "065908811516"  # DR account (injected by workflow)
 
   roles = {
     sqs-producer = {
       service_accounts = [ ... ]  # Same SAs as prod
       inline_policies = {
         # ARNs point to DR resources (us-east-2, DR account)
-        sqs-send = "{ ... arn:aws:sqs:us-east-2:<dr-account>:sqs-aw-ue2-* ... }"
+        sqs-send = "{ ... arn:aws:sqs:us-east-2:065908811516:sqs-aw-ue2-* ... }"
       }
     }
     # ... other roles
@@ -218,15 +224,31 @@ The son repo's `cd-on-merge.yml` workflow handles DR automatically:
 ```
 PROD apply succeeds
   └─▶ if dr_enabled == true:
-        ├─ DR Prepare (resolve DR account, region, extra_vars)
+        ├─ DR Prepare (resolve DR account 065908811516, region us-east-2, extra_vars)
         ├─ DR CI (plan in us-east-2 with DR account role)
-        └─ DR CD (apply — creates/updates all DR resources)
+        └─ DR CD (apply — creates/updates all DR resources in DR account)
 ```
 
 This is the same pattern already validated in `iac-tfn-aurora-postgresql-contenedores`.
-The workflow resolves the DR account from Port.io inputs (no `accounts.yaml` needed).
+The workflow resolves the DR account from Port.io inputs (via `dr_account_id` input).
 
-## DR Cost Summary (Warm Standby, Idle)
+**Important workflow change**: The `dr-prepare` step in `cd-on-merge.yml` must
+use a dedicated `dr_account_id` input (from Port.io) instead of reusing
+`prod_account_id`. The assume-role in CI targets the DR account's
+`terraform-apply-role`, and `extra_vars` passes `aws_account_id=${DR_ACCOUNT_ID}`
+to the modules.
+
+Port.io inputs for this son repo:
+```
+dev_account_id:     "588738594258"
+qa_account_id:      "194722404542"
+preprod_account_id: "054037105782"
+prod_account_id:    "761018868392"
+dr_account_id:      "065908811516"   ← NEW: separate DR account
+dr_enabled:         true
+```
+
+## DR Cost Summary (Warm Standby, Idle — Account 065908811516)
 
 | Service | Monthly DR Cost (idle) | Notes |
 |---------|----------------------|-------|
