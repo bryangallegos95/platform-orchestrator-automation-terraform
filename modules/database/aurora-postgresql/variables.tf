@@ -238,6 +238,30 @@ variable "global_cluster_identifier" {
   default     = ""
 }
 
+variable "source_account_id" {
+  description = <<-EOT
+    Cross-account Global Database: account ID where the PRIMARY cluster lives.
+    Required ONLY when the DR cluster joins a Global Database in a DIFFERENT
+    AWS account (e.g. prod account 761... while DR runs in a separate DR account).
+
+    When set, the module:
+      1. Constructs the global_cluster_identifier ARN with this account
+         (required for cross-account membership).
+      2. Documents the prerequisite: the primary account must share the
+         Global Database via the RDS console/API or AWS RAM.
+
+    "" (empty) => same-account DR (default — prod and DR share the same account,
+    which is the current validated flow for this platform).
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.source_account_id == "" || can(regex("^[0-9]{12}$", var.source_account_id))
+    error_message = "source_account_id must be empty or a valid 12-digit AWS account ID."
+  }
+}
+
 # ── KMS (existing account CMK for RDS) ────────────────────────────────────────
 variable "kms_key_alias" {
   description = "Alias of the account's pre-existing RDS CMK, discovered at plan time. The module NEVER creates keys. Canonical account baseline alias is 'alias/RDS' (case-sensitive)."

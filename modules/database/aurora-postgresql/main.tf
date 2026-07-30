@@ -61,7 +61,7 @@ resource "aws_rds_cluster" "this" {
   database_name             = local.is_global_secondary ? null : (var.database_name != "" ? var.database_name : null)
   master_username           = local.is_global_secondary ? null : var.master_username
   master_password           = local.is_global_secondary ? null : var.master_password
-  global_cluster_identifier = local.is_global_secondary ? var.global_cluster_identifier : null
+  global_cluster_identifier = local.is_global_secondary ? local.effective_global_cluster_identifier : null
 
   db_subnet_group_name            = aws_db_subnet_group.this.name
   db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.this.name
