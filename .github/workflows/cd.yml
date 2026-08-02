@@ -220,6 +220,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
+          rm -rf /tmp/plan-download
           if [ -n "${{ inputs.ci_run_id }}" ]; then
             gh run download "${{ inputs.ci_run_id }}" \
               --name "${{ inputs.plan_artifact_name }}" \
