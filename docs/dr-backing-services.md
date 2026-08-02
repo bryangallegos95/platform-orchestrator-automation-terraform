@@ -106,7 +106,7 @@ empty in us-east-2.
 **How it works**:
 - The same module creates identical queues in DR (`ambiente = "dr"`)
 - Naming: `sqs-aw-ue2-<service>-<workload>-<queue>-dr`
-- Same CMK encryption (using the DR account's `alias/SQS` key)
+- Same CMK encryption (using the DR account's `alias/SQS_SNS` key)
 - Same queue policies (deny non-TLS, deny non-owner)
 
 **No activation required**: When ROSA DR pods start, they write/read from

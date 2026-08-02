@@ -82,9 +82,9 @@ variable "aws_account_id" {
 
 # ── KMS ───────────────────────────────────────────────────────────────────────
 variable "kms_key_alias" {
-  description = "Alias of the account's pre-existing SQS CMK, discovered at plan time. The module NEVER creates keys."
+  description = "Alias of the account's pre-existing SQS/SNS CMK, discovered at plan time. The module NEVER creates keys. Default: alias/SQS_SNS (shared key per Security policy for SQS and SNS)."
   type        = string
-  default     = "alias/SQS"
+  default     = "alias/SQS_SNS"
 
   validation {
     condition     = can(regex("^alias/", var.kms_key_alias))
