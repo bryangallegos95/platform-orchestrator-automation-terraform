@@ -15,14 +15,14 @@
 #                   ceiling, extra readers, non-security parameters, tags...).
 #
 # Naming pattern reference:
-#   Cluster        : rds-aw-{region_short}-{workload}-{ambiente}
-#   Instance       : rds-aw-{region_short}-{workload}-{nn}-{ambiente}
-#   Subnet group   : sng-aw-{region_short}-{workload}-{ambiente}
-#   Cluster PG     : cpg-aw-{region_short}-{workload}-{ambiente}
-#   Instance PG    : dpg-aw-{region_short}-{workload}-{ambiente}
-#   SG             : sgp-aw-{region_short}-{workload}-{ambiente}
-#   Monitoring role: iam-role-aw-{region_short}-{workload}-rds-monitoring-{ambiente}
-#   Global cluster : gdb-aw-{workload}  (region-agnostic by design)
+#   Cluster        : rds-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   Instance       : rds-aw-{region_short}-{workload}-{funcionalidad}-{nn}-{ambiente}
+#   Subnet group   : sng-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   Cluster PG     : cpg-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   Instance PG    : dpg-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   SG             : sgp-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   Monitoring role: iam-role-aw-{region_short}-{workload}-{funcionalidad}-rds-monitoring-{ambiente}
+#   Global cluster : gdb-aw-{workload}-{funcionalidad}  (region-agnostic by design)
 #   VPC lookup     : vpc-aw-{region_short}-{vpc_service}-{ambiente}
 
 locals {
@@ -38,14 +38,19 @@ locals {
   # ── Discovery targets (contract with modules/networking/vpc) ─────────────
   vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.vpc_service}-${var.ambiente}"
 
+  # ── Composed naming suffix ───────────────────────────────────────────────
+  # Combines workload + funcionalidad for the full resource name segment.
+  # Pattern: {tipo}-aw-{region}-{workload}-{funcionalidad}-{ambiente}
+  resource_suffix = "${var.workload}-${var.funcionalidad}"
+
   # ── Resource names ────────────────────────────────────────────────────────
-  cluster_name         = "rds-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  subnet_group_name    = "sng-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  cluster_pg_name      = "cpg-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  instance_pg_name     = "dpg-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  sg_name              = "sgp-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  monitoring_role_name = "iam-role-aw-${local.region_short}-${var.workload}-rds-monitoring-${var.ambiente}"
-  global_cluster_name  = "gdb-aw-${var.workload}"
+  cluster_name         = "rds-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  subnet_group_name    = "sng-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  cluster_pg_name      = "cpg-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  instance_pg_name     = "dpg-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  sg_name              = "sgp-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  monitoring_role_name = "iam-role-aw-${local.region_short}-${local.resource_suffix}-rds-monitoring-${var.ambiente}"
+  global_cluster_name  = "gdb-aw-${local.resource_suffix}"
 
   # 🔒 LOCKED — engine port. Security standard: 15432 (not the default 5432).
   # Applied to the cluster AND the Security Group ingress rules. Not exposed

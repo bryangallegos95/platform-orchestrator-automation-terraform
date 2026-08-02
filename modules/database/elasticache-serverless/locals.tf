@@ -13,9 +13,9 @@
 #                daily snapshot time, user group, extra tags.
 #
 # Naming pattern:
-#   Cache       : ec-aw-{region_short}-{workload}-{ambiente}
-#   Subnet group: ecsng-aw-{region_short}-{workload}-{ambiente}
-#   SG          : sgp-aw-{region_short}-{workload}-ec-{ambiente}
+#   Cache       : ec-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   Subnet group: ecsng-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
+#   SG          : sgp-aw-{region_short}-{workload}-{funcionalidad}-ec-{ambiente}
 
 locals {
   # ── Region-derived values ────────────────────────────────────────────────
@@ -30,10 +30,15 @@ locals {
   # whose service tag differs from the workload name.
   vpc_service = var.vpc_discovery_service != "" ? var.vpc_discovery_service : var.workload
 
+  # ── Composed naming suffix ───────────────────────────────────────────────
+  # Combines workload + funcionalidad for the full resource name segment.
+  # Pattern: {tipo}-aw-{region}-{workload}-{funcionalidad}-{ambiente}
+  resource_suffix = "${var.workload}-${var.funcionalidad}"
+
   # ── Resource names ────────────────────────────────────────────────────────
-  cache_name        = "ec-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  subnet_group_name = "ecsng-aw-${local.region_short}-${var.workload}-${var.ambiente}"
-  sg_name           = "sgp-aw-${local.region_short}-${var.workload}-ec-${var.ambiente}"
+  cache_name        = "ec-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  subnet_group_name = "ecsng-aw-${local.region_short}-${local.resource_suffix}-${var.ambiente}"
+  sg_name           = "sgp-aw-${local.region_short}-${local.resource_suffix}-ec-${var.ambiente}"
 
   # ── Discovery targets (contract with modules/networking/vpc) ─────────────
   vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.vpc_service}-${var.ambiente}"

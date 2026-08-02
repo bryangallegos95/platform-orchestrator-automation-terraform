@@ -54,6 +54,16 @@ variable "workload" {
   }
 }
 
+variable "funcionalidad" {
+  description = "Propósito específico de este repo/recurso dentro del workload. Se usa en naming: {tipo}-aw-{region}-{workload}-{funcionalidad}-{ambiente}. Ejemplo: backingservices, consultasclientes, onboarding"
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", var.funcionalidad))
+    error_message = "funcionalidad must be lowercase alphanumeric and hyphens only."
+  }
+}
+
 variable "ambiente" {
   description = "Environment name."
   type        = string
