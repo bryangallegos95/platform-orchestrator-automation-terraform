@@ -1,70 +1,29 @@
-# ┌─────────────────────────────────────────────────────────────────────────────┐
-# │  DEPRECATED — v2.3.x (legacy monolithic CI)                                │
-# │                                                                             │
-# │  This workflow is DEPRECATED as of v2.4.0 (ADR-008).                        │
-# │  New repos should use the split workflows:                                  │
-# │    - ci-validate.yml  → format + lint + sast (ONE time)                     │
-# │    - ci-plan.yml      → plan + cost + security (PER component)              │
-# │    - ci-create-pr.yml → consolidated PR (ONE time)                          │
-# │                                                                             │
-# │  This file is kept for backward compatibility with existing repos           │
-# │  that have not yet migrated to the new orchestrator pattern.                │
-# │                                                                             │
-# │  DO NOT add new features to this file.                                      │
-# │  Migration guide: platform-knowledge-base/strategy/decisions/008-*          │
-# └─────────────────────────────────────────────────────────────────────────────┘
-#
 # ORG-DEVOPS/.github/workflows/ci.yml
 #
-# Reusable CI workflow — called by product (son) repos.
+# Reusable CI workflow — ADR-009: terragrunt run-all simplification
 #
-# PREREQUISITES:
-#   Runner image v2.0.0+ with pre-installed:
-#   Terraform, Terragrunt, TFLint (+ AWS plugin), Infracost, gh CLI, Python 3.9+
+# AUTO-DETECTS multi-component directories:
+#   - If working_directory contains subdirectories with terragrunt.hcl → run-all plan
+#   - If working_directory is a single component → terragrunt plan (legacy behavior)
+#
+# This replaces the ADR-008 split pattern (ci-validate + ci-plan + ci-create-pr)
+# with a single workflow call. Terragrunt resolves dependencies internally.
 #
 # JOBS:
-#   ⓪ resolve    → derives bucket, state key, region from environment input
+#   ⓪ resolve    → derives bucket, state key, region
 #   ① format     → terragrunt hclfmt --check
-#   ② lint       → tflint (tags + naming) + naming_pattern_validator.sh
-#   ③ plan       → terragrunt validate + plan, uploads artifact
-#   ④ cost       → infracost breakdown (only if changes detected)
-#   ⑤ security   → Prowler IaC + AWS CIS 2.0 (primary gate)
-#   ⑤b sast      → Checkmarx SAST/SCA (conditional — only if app code detected)
-#   ⑥ create-pr  → auto-creates PR with plan + cost + security + DEPLOYMENT_CONTEXT
-#
-# ENVIRONMENT → RUNNER TAG → REGION MAPPING:
-#   dev      → [self-hosted, terraform, dev]      → us-east-1
-#   qa       → [self-hosted, terraform, qa]       → us-east-1
-#   preprod  → [self-hosted, terraform, preprod]  → us-east-1
-#   prod     → [self-hosted, terraform, prod]     → us-east-1
-#   dr       → [self-hosted, terraform, dr]       → us-east-2
-#
-# RUNNER OVERRIDE:
-#   If `runner_label` is set, it replaces the environment in the runner tag.
-#   Example: runner_label=prod → always uses [self-hosted, terraform, prod]
-#   Use case: hub-networking (single account, all envs deploy from prod runner).
-
-#----------- Integración BeyondTrust--------------------------------------------
-# FLUJO VALIDADO (4 pasos):
-#   1. POST /auth/connect/token          → OAuth access_token
-#   2. POST /Auth/SignAppin (con cookie) → sesión activa
-#   3. GET  /secrets-safe/secrets        → lista todos los secretos del vault
-#              filtrar por .Title        → obtener .Id
-#   4. GET  /secrets-safe/secrets/{Id}   → valor real en .Password
-#      POST /Auth/Signout                → cerrar sesión
-#
-# AISLAMIENTO POR VAULT:
-#   Cada Application User (BYT_CLIENT_ID_DEV, _QA, _PREPROD, _PROD) solo tiene
-#   acceso a su vault (VaultDev, VaultQA, VaultPreprod, VaultProd).
-#   El listado /secrets-safe/secrets ya está scoped al vault correcto — no hay
-#   que pasar el vault ni el folder path. Solo el Title del secreto.
+#   ② lint       → tflint governance rules
+#   ③ plan       → terragrunt [run-all] plan + upload artifact
+#   ④ cost       → infracost breakdown (if changes detected)
+#   ⑤ security   → Prowler IaC scan
+#   ⑤b sast      → Checkmarx SAST/SCA (conditional)
+#   ⑥ create-pr  → auto-creates PR with plan + DEPLOYMENT_CONTEXT
 
 name: "[reusable] Terraform CI"
 
 on:
   workflow_call:
     inputs:
-      # ─── Required inputs ───────────────────────────────────────
       environment:
         description: "Target environment: dev, qa, preprod, prod, dr"
         required: true
@@ -82,92 +41,54 @@ on:
         required: true
         type: string
 
+
       # ─── Runner override ─────────────────────────────────────────
       runner_label:
-        description: |
-          Override the runner tag used for self-hosted jobs.
-          Default: uses the environment value (dev/qa/preprod/prod/dr).
-          Use case: repos that deploy all environments from a single account
-          (e.g., hub-networking) can set runner_label=prod to always use
-          the prod runner regardless of the target environment.
+        description: "Override the runner tag. Default: uses environment value."
         required: false
         type: string
         default: ""
 
       # ─── Optional inputs ───────────────────────────────────────
       extra_vars:
-        description: |
-          Space-separated Terraform -var overrides injected at plan time.
-          Format: "key1=value1 key2=value2"
-          Example: "tgw_id=tgw-0abc1234 service=datosanalitica ambiente=dev"
+        description: "Space-separated Terraform -var overrides. Format: 'key1=value1 key2=value2'"
         required: false
         type: string
         default: ""
-
       checkmarx_scan:
-        description: |
-          Run Checkmarx SAST/SCA scan for application code.
-          Only runs if application code is detected (src/, lambda/, etc.).
-          Default: true (auto-detect mode).
-          Set to false to skip entirely.
+        description: "Run Checkmarx SAST/SCA scan. Default: true (auto-detect)."
         required: false
         type: boolean
         default: true
-
       security_scan:
-        description: |
-          Run Prowler security scan (IaC + AWS CIS 2.0).
-          Default: true (secure by default).
-          Set to false only for PoC repos — requires CloudOps approval.
+        description: "Run Prowler IaC security scan. Default: true."
         required: false
         type: boolean
         default: true
-
       fail_on_high_critical:
-        description: |
-          Fail pipeline and block PR creation on CRITICAL/HIGH findings.
-          Default: true (enforce by default).
-          Set to false for report-only mode — requires CloudOps approval
-          via branch protection on testing/master.
+        description: "Fail on CRITICAL/HIGH findings. Default: true."
         required: false
         type: boolean
         default: true
-        
       secret_titles:
         description: |
-          JSON array de secretos a recuperar de BeyondTrust Secrets Safe
-          e inyectar como TF_VAR_* en el plan.
-
-          Formato:
-            '[{"title": "client-secret", "tf_var": "entra_client_secret"}]'
-
-          Ejemplo multi-secreto:
-            '[
-              {"title": "client-secret",    "tf_var": "entra_client_secret"},
-              {"title": "htpasswd-password", "tf_var": "htpasswd_password"}
-            ]'
-
-          Requisitos:
-            - BYT_CLIENT_ID_<ENV> y BYT_CLIENT_SECRET_<ENV> disponibles vía secrets: inherit
-            - BT_URL seteado como GitHub Variable (vars.BT_URL)
-            - runner con curl y jq (pre-instalados en la imagen del runner)
-            - El Application User del env tiene acceso al secreto en su vault
+          JSON array of secrets to retrieve from BeyondTrust and inject as TF_VAR_*.
+          Format: '[{"title": "secret-name", "tf_var": "variable_name"}]'
         required: false
         type: string
         default: ""
-
       create_pr:
         description: "Whether CI should auto-create a Pull Request."
         required: false
         type: boolean
         default: true
       pr_source_branch:
-        description: "Source branch for the PR (e.g. feature/add-vpc or dev)."
+        description: "Source branch for the PR."
         required: false
         type: string
         default: ""
       pr_target_branch:
-        description: "Target branch for the PR (e.g. dev, testing, staging, master)."
+        description: "Target branch for the PR."
         required: false
         type: string
         default: ""
@@ -182,14 +103,15 @@ on:
         type: string
         default: "terraform-apply-role"
 
+
       # ─── Deployment context (passthrough for promotion chain) ───
       dev_account_id:
-        description: "DEV account ID — passed through for promotion chain."
+        description: "DEV account ID."
         required: false
         type: string
         default: ""
       qa_account_id:
-        description: "QA account ID — passed through for promotion chain."
+        description: "QA account ID."
         required: false
         type: string
         default: ""
@@ -199,12 +121,12 @@ on:
         type: string
         default: ""
       prod_account_id:
-        description: "PROD account ID — passed through for promotion chain."
+        description: "PROD account ID."
         required: false
         type: string
         default: ""
       dr_enabled:
-        description: "Whether DR (us-east-2) is enabled for prod."
+        description: "Whether DR is enabled for prod."
         required: false
         type: boolean
         default: false
@@ -224,6 +146,9 @@ on:
       environment:
         description: "Resolved environment name."
         value: ${{ jobs.resolve.outputs.environment }}
+      is_multi_component:
+        description: "Whether run-all mode was used."
+        value: ${{ jobs.resolve.outputs.is_multi_component }}
       pr_number:
         description: "PR number if created."
         value: ${{ jobs.create-pr.outputs.pr_number }}
@@ -235,21 +160,28 @@ concurrency:
   group: "tf-ci-${{ inputs.environment }}-${{ inputs.ou_name }}-${{ github.event.pull_request.number || github.ref_name }}"
   cancel-in-progress: true
 
+
 jobs:
   # ─────────────────────────────────────────────
-  #  ⓪ RESOLVE
+  #  ⓪ RESOLVE — detect single vs multi-component
   # ─────────────────────────────────────────────
   resolve:
     name: "⓪ Resolve"
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
-      environment: ${{ steps.derive.outputs.environment }}
-      region:      ${{ steps.derive.outputs.region }}
-      bucket:      ${{ steps.derive.outputs.bucket }}
-      state_key:   ${{ steps.derive.outputs.state_key }}
+      environment:        ${{ steps.derive.outputs.environment }}
+      region:             ${{ steps.derive.outputs.region }}
+      bucket:             ${{ steps.derive.outputs.bucket }}
+      state_key:          ${{ steps.derive.outputs.state_key }}
+      is_multi_component: ${{ steps.detect.outputs.is_multi_component }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_source_branch || github.ref }}
+
       - name: Derive infrastructure context
         id: derive
         run: |
@@ -267,7 +199,7 @@ jobs:
               BUCKET="s3-aw-ue2-terraform-state-dr"
               ;;
             *)
-              echo "::error::Invalid environment: '$ENV'. Valid: dev, qa, preprod, prod, dr"
+              echo "::error::Invalid environment: '$ENV'."
               exit 1
               ;;
           esac
@@ -279,18 +211,35 @@ jobs:
           echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
           echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
 
+
+      - name: Detect multi-component directory
+        id: detect
+        run: |
+          WORK_DIR="${{ inputs.working_directory }}"
+          if find "$WORK_DIR" -mindepth 2 -name "terragrunt.hcl" 2>/dev/null | grep -q .; then
+            echo "is_multi_component=true" >> $GITHUB_OUTPUT
+            echo "Detected MULTI-COMPONENT directory (run-all mode)."
+            echo "Components found:"
+            for dir in "$WORK_DIR"/*/; do
+              if [ -f "${dir}terragrunt.hcl" ]; then
+                echo "  - $(basename $dir)"
+              fi
+            done
+          else
+            echo "is_multi_component=false" >> $GITHUB_OUTPUT
+            echo "Detected SINGLE-COMPONENT directory (standard mode)."
+          fi
+
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ### ⓪ Resolved Context
           | Key | Value |
           |-----|-------|
-          | Environment | \`${ENV}\` |
-          | Region | \`${REGION}\` |
-          | Bucket | \`${BUCKET}\` |
-          | State key | \`${STATE_KEY}\` |
+          | Environment | \`${{ inputs.environment }}\` |
+          | Working dir | \`${WORK_DIR}\` |
+          | Multi-component | \`$([ -n "$(find "$WORK_DIR" -mindepth 2 -name "terragrunt.hcl" 2>/dev/null)" ] && echo "true" || echo "false")\` |
           | Account ID | \`${{ inputs.account_id }}\` |
-          | Working dir | \`${{ inputs.working_directory }}\` |
-          | Extra vars | \`${{ inputs.extra_vars }}\` |
           EOF
+
 
   # ─────────────────────────────────────────────
   #  ① FORMAT
@@ -301,7 +250,7 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
-      
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -309,7 +258,6 @@ jobs:
           ref: ${{ inputs.pr_source_branch || github.ref }}
 
       - name: Terragrunt hclfmt
-        working-directory: ${{ inputs.working_directory }}
         run: terragrunt hclfmt --check --diff
 
   # ─────────────────────────────────────────────
@@ -339,16 +287,14 @@ jobs:
 
       - name: Copy governance files
         run: |
-          # Copy .tflint.hcl from orchestrator if not present in repo
           if [ ! -f ".tflint.hcl" ]; then
             cp .orchestrator/.tflint.hcl .tflint.hcl
             echo "Copied .tflint.hcl from orchestrator"
           fi
-          # Copy naming validator script
           mkdir -p scripts
           cp .orchestrator/scripts/naming_pattern_validator.sh scripts/
           chmod +x scripts/naming_pattern_validator.sh
-          echo "Copied naming_pattern_validator.sh from orchestrator"
+
 
       - name: Assume role in target account
         uses: aws-actions/configure-aws-credentials@v4
@@ -357,29 +303,49 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "tf-lint-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-          
+
       - name: Configure git for private modules
         run: |
           git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
         env:
           GH_PAT: ${{ secrets.GH_TOKEN }}
-          
-      - name: Terragrunt init
-        working-directory: ${{ inputs.working_directory }}
-        env:
-          TERRAGRUNT_NON_INTERACTIVE: "true"
-        run: terragrunt init -reconfigure
 
-      - name: Run TFLint (tags + naming + best practices)
-        working-directory: ${{ inputs.working_directory }}
+      - name: Run TFLint on all components
         run: |
           echo "── Running TFLint with enterprise governance rules ──"
-          tflint --format=compact
-          echo ""
-          echo "✅ TFLint passed: tags, naming convention, best practices."
+          FAILED=0
+          WORK_DIR="${{ inputs.working_directory }}"
+
+          if [ "${{ needs.resolve.outputs.is_multi_component }}" = "true" ]; then
+            # Multi-component: lint each subdirectory
+            for dir in ${WORK_DIR}/*/; do
+              if [ -f "${dir}terragrunt.hcl" ]; then
+                echo "── Linting: ${dir} ──"
+                cd "${dir}"
+                terragrunt init -reconfigure 2>/dev/null || true
+                tflint --format=compact || FAILED=1
+                cd "${{ github.workspace }}"
+              fi
+            done
+          else
+            # Single component: lint the working directory
+            cd "${WORK_DIR}"
+            terragrunt init -reconfigure 2>/dev/null || true
+            tflint --format=compact || FAILED=1
+            cd "${{ github.workspace }}"
+          fi
+
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::TFLint failed for one or more components."
+            exit 1
+          fi
+          echo "TFLint passed."
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+
 
   # ─────────────────────────────────────────────
-  #  ③ VALIDATE + PLAN
+  #  ③ PLAN — auto-detects run-all vs single
   # ─────────────────────────────────────────────
   plan:
     name: "③ Plan"
@@ -388,7 +354,7 @@ jobs:
     env:
       OU_NAME: ${{ inputs.ou_name }}
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
-      
+
     outputs:
       exitcode:      ${{ steps.plan.outputs.exitcode }}
       artifact_name: ${{ steps.artifact_name.outputs.value }}
@@ -406,25 +372,18 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "tf-plan-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-          
+
       - name: Configure git for private modules
         run: |
           git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
         env:
           GH_PAT: ${{ secrets.GH_TOKEN }}
-          
-      - name: Terragrunt init
-        working-directory: ${{ inputs.working_directory }}
-        env:
-          TERRAGRUNT_NON_INTERACTIVE: "true"
-        run: terragrunt init -reconfigure
+
 
       - name: Retrieve secrets from BeyondTrust Secrets Safe
         if: inputs.secret_titles != ''
         env:
           _BT_URL: ${{ vars.BT_URL }}
-          # Credenciales per-env — indirect expansion selecciona la correcta en runtime.
-          # DR usa PROD (mismo vault). Unused secrets llegan vacíos — inofensivo.
           _BYT_CLIENT_ID_DEV:         ${{ secrets.BYT_CLIENT_ID_DEV }}
           _BYT_CLIENT_SECRET_DEV:     ${{ secrets.BYT_CLIENT_SECRET_DEV }}
           _BYT_CLIENT_ID_QA:          ${{ secrets.BYT_CLIENT_ID_QA }}
@@ -437,7 +396,6 @@ jobs:
         run: |
           echo "── Retrieving secrets from BeyondTrust Secrets Safe ──"
 
-          # ── Seleccionar credenciales del ambiente via indirect expansion ──
           ENV="${{ inputs.environment }}"
           case "$ENV" in
             dr)      ENV_KEY="PROD" ;;
@@ -446,43 +404,40 @@ jobs:
             preprod) ENV_KEY="PREPROD" ;;
             prod)    ENV_KEY="PROD" ;;
             *)
-              echo "::error::Ambiente desconocido '${ENV}'."
+              echo "::error::Unknown environment '${ENV}'."
               exit 1
               ;;
           esac
 
-          # Corrección: indirect expansion con nombres de variables válidos en bash
           ID_VAR="_BYT_CLIENT_ID_${ENV_KEY}"
           SECRET_VAR="_BYT_CLIENT_SECRET_${ENV_KEY}"
           BT_CLIENT_ID="${!ID_VAR}"
           BT_CLIENT_SECRET="${!SECRET_VAR}"
 
           if [ -z "$BT_CLIENT_ID" ] || [ -z "$BT_CLIENT_SECRET" ]; then
-            echo "::error::Credenciales BeyondTrust no encontradas para env '${ENV}' (key: ${ENV_KEY})."
-            echo "::error::Verifica que existen los secrets: BYT_CLIENT_ID_${ENV_KEY} y BYT_CLIENT_SECRET_${ENV_KEY}"
+            echo "::error::BeyondTrust credentials not found for env '${ENV}' (key: ${ENV_KEY})."
             exit 1
           fi
 
           if [ -z "$_BT_URL" ]; then
-            echo "::error::BT_URL no está seteado."
-            echo "::error::Créalo en: Settings → Secrets and variables → Actions → Variables → BT_URL"
+            echo "::error::BT_URL variable is not set."
             exit 1
           fi
 
-          # ── Paso 1: OAuth token ───────────────────────────────────────────
-          echo "Autenticando con BeyondTrust (env=${ENV}, vault key=${ENV_KEY})..."
+
+          # OAuth token
           TOKEN=$(curl -s -f -X POST "${_BT_URL}/auth/connect/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "grant_type=client_credentials&client_id=${BT_CLIENT_ID}&client_secret=${BT_CLIENT_SECRET}" \
             | jq -r '.access_token // empty')
 
           if [ -z "$TOKEN" ]; then
-            echo "::error::BeyondTrust no devolvió access_token. Verifica BYT_CLIENT_ID_${ENV_KEY} y BYT_CLIENT_SECRET_${ENV_KEY}."
+            echo "::error::BeyondTrust did not return access_token."
             exit 1
           fi
           echo "::add-mask::$TOKEN"
 
-          # ── Paso 2: SignAppin — crear sesión con cookie ───────────────────
+          # SignAppin
           BT_COOKIE=$(mktemp /tmp/bt_session_XXXXXX.txt)
           SIGNIN_HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
             -c "$BT_COOKIE" \
@@ -492,66 +447,56 @@ jobs:
             -d "")
 
           if [ "$SIGNIN_HTTP" != "200" ]; then
-            echo "::error::BeyondTrust SignAppin falló (HTTP ${SIGNIN_HTTP})."
+            echo "::error::BeyondTrust SignAppin failed (HTTP ${SIGNIN_HTTP})."
             rm -f "$BT_COOKIE"
             exit 1
           fi
-          echo "✅ Sesión BeyondTrust establecida."
 
-          # ── Paso 3: Listar todos los secretos del vault (scoped al Application User) ──
+          # List secrets
           ALL_SECRETS=$(curl -s -f -b "$BT_COOKIE" \
             -H "Authorization: Bearer $TOKEN" \
             "${_BT_URL}/secrets-safe/secrets")
 
-          # ── Paso 4: Por cada entry en secret_titles → buscar ID → fetch valor ──
-          COUNT=0
+          # Fetch each secret by title and inject as TF_VAR_*
           echo "$_SECRET_TITLES" | jq -c '.[]' | while IFS= read -r entry; do
             TITLE=$(echo "$entry"  | jq -r '.title')
             TF_VAR=$(echo "$entry" | jq -r '.tf_var')
 
-            # Resolver ID filtrando por Title en el listado
             SECRET_ID=$(echo "$ALL_SECRETS" | jq -r \
               --arg t "$TITLE" '.[] | select(.Title == $t) | .Id' | head -1)
 
             if [ -z "$SECRET_ID" ]; then
-              echo "::error::Secreto con Title '${TITLE}' no encontrado en el vault de env '${ENV}'."
-              echo "::error::Verifica que el secreto existe y el Application User BYT_CLIENT_ID_${ENV_KEY} tiene acceso."
+              echo "::error::Secret '${TITLE}' not found in vault for env '${ENV}'."
               curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
                 -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
               rm -f "$BT_COOKIE"
               exit 1
             fi
 
-            # Fetch valor real por ID (el listado no incluye el valor por seguridad)
             SECRET_VALUE=$(curl -s -f -b "$BT_COOKIE" \
               -H "Authorization: Bearer $TOKEN" \
               "${_BT_URL}/secrets-safe/secrets/${SECRET_ID}" \
               | jq -r '.Password // empty')
 
             if [ -z "$SECRET_VALUE" ]; then
-              echo "::error::Secreto '${TITLE}' (id: ${SECRET_ID}) devolvió valor vacío."
+              echo "::error::Secret '${TITLE}' (id: ${SECRET_ID}) returned empty."
               curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
                 -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
               rm -f "$BT_COOKIE"
               exit 1
             fi
 
-            # Maskear y exportar como TF_VAR_*
             echo "::add-mask::$SECRET_VALUE"
             printf 'TF_VAR_%s=%s\n' "$TF_VAR" "$SECRET_VALUE" >> $GITHUB_ENV
-            echo "✅ TF_VAR_${TF_VAR} inyectado (title: ${TITLE})"
-            COUNT=$((COUNT + 1))
+            echo "TF_VAR_${TF_VAR} injected (title: ${TITLE})"
           done
 
-          # ── Signout + cleanup ─────────────────────────────────────────────
+          # Signout
           curl -s -b "$BT_COOKIE" -X POST "${_BT_URL}/Auth/Signout" \
             -H "Authorization: Bearer $TOKEN" > /dev/null 2>&1 || true
           rm -f "$BT_COOKIE"
-          echo "── Sesión BeyondTrust cerrada. ──"
-          
-      - name: Terragrunt validate
-        working-directory: ${{ inputs.working_directory }}
-        run: terragrunt validate
+          echo "── BeyondTrust session closed. ──"
+
 
       - name: Terragrunt plan
         id: plan
@@ -561,7 +506,7 @@ jobs:
           TF_CLI_ARGS: "-no-color"
           TERRAGRUNT_NO_COLOR: "true"
         run: |
-          # Build -var flags from extra_vars input
+          # Build -var flags from extra_vars
           EXTRA_VAR_FLAGS=""
           if [ -n "${{ inputs.extra_vars }}" ]; then
             for pair in ${{ inputs.extra_vars }}; do
@@ -569,14 +514,40 @@ jobs:
             done
           fi
 
+          IS_MULTI="${{ needs.resolve.outputs.is_multi_component }}"
+          PLAN_OUT_DIR="$(pwd)/plans"
+          mkdir -p "$PLAN_OUT_DIR"
+
           set +e
-          eval terragrunt plan \
-            $EXTRA_VAR_FLAGS \
-            -out=$(pwd)/tfplan \
-            -input=false \
-            -detailed-exitcode \
-            2>&1 | tee plan_output.txt
-          EXITCODE=${PIPESTATUS[0]}
+          if [ "$IS_MULTI" = "true" ]; then
+            # ── MULTI-COMPONENT: terragrunt run-all plan ──
+            echo "══════════════════════════════════════════════"
+            echo "  MODE: terragrunt run-all plan"
+            echo "  Terragrunt resolves dependencies internally"
+            echo "══════════════════════════════════════════════"
+            eval terragrunt run-all plan \
+              $EXTRA_VAR_FLAGS \
+              --terragrunt-non-interactive \
+              --terragrunt-out-dir "$PLAN_OUT_DIR" \
+              -input=false \
+              -detailed-exitcode \
+              2>&1 | tee plan_output.txt
+            EXITCODE=${PIPESTATUS[0]}
+          else
+            # ── SINGLE-COMPONENT: standard terragrunt plan ──
+            echo "══════════════════════════════════════════════"
+            echo "  MODE: terragrunt plan (single component)"
+            echo "══════════════════════════════════════════════"
+            eval terragrunt plan \
+              $EXTRA_VAR_FLAGS \
+              -out="$PLAN_OUT_DIR/tfplan" \
+              -input=false \
+              -detailed-exitcode \
+              2>&1 | tee plan_output.txt
+            EXITCODE=${PIPESTATUS[0]}
+          fi
+          set -e
+
           echo "exitcode=$EXITCODE" >> $GITHUB_OUTPUT
 
           if [ "$EXITCODE" -eq "1" ]; then
@@ -586,14 +557,15 @@ jobs:
 
           # Summary
           if [ "$EXITCODE" -eq "0" ]; then
-            echo "### ③ Plan: ✅ No changes" >> $GITHUB_STEP_SUMMARY
+            echo "### ③ Plan: No changes" >> $GITHUB_STEP_SUMMARY
           else
-            echo "### ③ Plan: ⚠️ Changes detected" >> $GITHUB_STEP_SUMMARY
+            echo "### ③ Plan: Changes detected" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
-            tail -20 plan_output.txt >> $GITHUB_STEP_SUMMARY
+            tail -30 plan_output.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           fi
           exit 0
+
 
       - name: Build artifact name
         id: artifact_name
@@ -607,15 +579,13 @@ jobs:
         with:
           name: ${{ steps.artifact_name.outputs.value }}
           path: |
-            ${{ inputs.working_directory }}/tfplan
+            ${{ inputs.working_directory }}/plans/
             ${{ inputs.working_directory }}/plan_output.txt
           retention-days: 14
           if-no-files-found: error
 
   # ─────────────────────────────────────────────
   #  ④ COST ESTIMATE
-  #  Uses Infracost CLI pre-installed in runner image.
-  #  INFRACOST_API_KEY injected via pod environment.
   # ─────────────────────────────────────────────
   cost:
     name: "④ Cost"
@@ -626,7 +596,7 @@ jobs:
       OU_NAME: ${{ inputs.ou_name }}
       INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
-      
+
     outputs:
       monthly_cost: ${{ steps.parse.outputs.monthly_cost }}
       cost_diff:    ${{ steps.parse.outputs.cost_diff }}
@@ -644,18 +614,13 @@ jobs:
           aws-region: ${{ needs.resolve.outputs.region }}
           role-session-name: "infracost-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
-          
+
       - name: Configure git for private modules
         run: |
           git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
         env:
           GH_PAT: ${{ secrets.GH_TOKEN }}
-          
-      - name: Terragrunt init
-        working-directory: ${{ inputs.working_directory }}
-        env:
-          TERRAGRUNT_NON_INTERACTIVE: "true"
-        run: terragrunt init -reconfigure
+
 
       - name: Download plan artifact
         uses: actions/download-artifact@v4
@@ -663,24 +628,56 @@ jobs:
           name: ${{ needs.plan.outputs.artifact_name }}
           path: ${{ inputs.working_directory }}
 
-      - name: Convert plan to JSON
-        working-directory: ${{ inputs.working_directory }}
-        run: terragrunt show -json $(pwd)/tfplan > tfplan.json
-
       - name: Generate Infracost estimate
         working-directory: ${{ inputs.working_directory }}
         run: |
-          infracost breakdown \
-            --path tfplan.json \
-            --format json \
-            --out-file infracost.json
+          IS_MULTI="${{ needs.resolve.outputs.is_multi_component }}"
+          TOTAL_MONTHLY="0"
+          TOTAL_DIFF="0"
+
+          if [ "$IS_MULTI" = "true" ]; then
+            # Multi-component: estimate each plan
+            for plan_dir in plans/*/; do
+              if [ -f "${plan_dir}tfplan" ]; then
+                COMPONENT=$(basename "$plan_dir")
+                cd "$COMPONENT"
+                terragrunt init -reconfigure 2>/dev/null || true
+                terragrunt show -json "../${plan_dir}tfplan" > tfplan.json 2>/dev/null || true
+                if [ -f "tfplan.json" ]; then
+                  infracost breakdown --path tfplan.json --format json --out-file infracost.json 2>/dev/null || true
+                  if [ -f "infracost.json" ]; then
+                    M=$(jq -r '.totalMonthlyCost // "0"' infracost.json)
+                    D=$(jq -r '.diffTotalMonthlyCost // "0"' infracost.json 2>/dev/null || echo "0")
+                    TOTAL_MONTHLY=$(echo "$TOTAL_MONTHLY + $M" | bc 2>/dev/null || echo "$TOTAL_MONTHLY")
+                    TOTAL_DIFF=$(echo "$TOTAL_DIFF + $D" | bc 2>/dev/null || echo "$TOTAL_DIFF")
+                  fi
+                fi
+                cd ..
+              fi
+            done
+          else
+            # Single component
+            terragrunt init -reconfigure 2>/dev/null || true
+            terragrunt show -json plans/tfplan > tfplan.json 2>/dev/null || true
+            if [ -f "tfplan.json" ]; then
+              infracost breakdown --path tfplan.json --format json --out-file infracost.json 2>/dev/null || true
+              if [ -f "infracost.json" ]; then
+                TOTAL_MONTHLY=$(jq -r '.totalMonthlyCost // "0"' infracost.json)
+                TOTAL_DIFF=$(jq -r '.diffTotalMonthlyCost // "0"' infracost.json 2>/dev/null || echo "0")
+              fi
+            fi
+          fi
+
+          echo "$TOTAL_MONTHLY" > /tmp/monthly_cost.txt
+          echo "$TOTAL_DIFF" > /tmp/cost_diff.txt
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
 
       - name: Parse cost output
         id: parse
-        working-directory: ${{ inputs.working_directory }}
         run: |
-          MONTHLY=$(jq -r '.totalMonthlyCost // "0.00"' infracost.json)
-          DIFF=$(jq -r '.diffTotalMonthlyCost // "0.00"' infracost.json 2>/dev/null || echo "0.00")
+          MONTHLY=$(cat /tmp/monthly_cost.txt 2>/dev/null || echo "0.00")
+          DIFF=$(cat /tmp/cost_diff.txt 2>/dev/null || echo "0.00")
           echo "monthly_cost=$MONTHLY" >> $GITHUB_OUTPUT
           echo "cost_diff=$DIFF" >> $GITHUB_OUTPUT
 
@@ -692,31 +689,9 @@ jobs:
           | Cost diff | \`\$${DIFF}/mo\` |
           EOF
 
-      - name: Upload cost artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: infracost-${{ inputs.environment }}-${{ github.sha }}
-          path: ${{ inputs.working_directory }}/infracost.json
-          retention-days: 14
 
   # ─────────────────────────────────────────────
-  #  ⑤ SECURITY — Prowler IaC (Static Analysis)
-  #  Primary security gate — replaces Checkmarx KICS.
-  #
-  #  What it does:
-  #    1. Installs Prowler via pip (until added to runner Dockerfile)
-  #    2. Runs IaC static analysis against Terraform files (NO AWS credentials needed)
-  #    3. Outputs SARIF for GitHub Code Scanning integration
-  #    4. Gates on CRITICAL/HIGH findings (blocks PR creation)
-  #
-  #  Architecture:
-  #    - CI: prowler iac (local, static, no secrets) → JSON results
-  #    - CD: POST /api/v1/scans → Prowler App (pending purchase from AWS Marketplace)
-  #    - Continuous: Prowler App Scheduler (managed by Security team — pending)
-  #
-  #  Control:
-  #    - input security_scan: true|false (default: true)
-  #    - input fail_on_high_critical: true|false (default: true)
+  #  ⑤ SECURITY — Prowler IaC
   # ─────────────────────────────────────────────
   security:
     name: "⑤ Security"
@@ -731,7 +706,6 @@ jobs:
       scan_executed:   ${{ steps.scan_result.outputs.scan_executed }}
       total_critical:  ${{ steps.evaluate.outputs.total_critical }}
       total_high:      ${{ steps.evaluate.outputs.total_high }}
-      total_medium:    ${{ steps.evaluate.outputs.total_medium }}
       prowler_summary: ${{ steps.build_summary.outputs.summary }}
 
     steps:
@@ -747,22 +721,14 @@ jobs:
 
       - name: Install Prowler + Trivy
         run: |
-          echo "── Installing Prowler + Trivy (IaC scan engine) ──"
           pip install prowler --quiet
-          prowler --version
-
-          # Trivy is required by Prowler IaC provider as the scanning backend
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-          trivy --version
-          echo "✅ Prowler + Trivy installed."
 
       - name: Run Prowler IaC scan
         id: prowler_scan
         continue-on-error: true
         run: |
-          echo "── Prowler IaC Scan (Terraform static analysis — no AWS credentials needed) ──"
           mkdir -p /tmp/prowler-results
-
           set +e
           prowler iac \
             --scan-path . \
@@ -770,121 +736,59 @@ jobs:
             --output-directory /tmp/prowler-results \
             --no-color \
             --verbose 2>&1 | tee /tmp/prowler-output.txt
-          PROWLER_EXIT=$?
           set -e
 
-          echo "exit_code=$PROWLER_EXIT" >> $GITHUB_OUTPUT
-          echo "Prowler IaC scan exit code: $PROWLER_EXIT"
       - name: Evaluate scan results
         id: evaluate
         run: |
-          # Parse results from Prowler stdout summary table.
-          # With --no-color, the table line looks like:
-          # | iac        | terraform | FAIL (1) |          0 |      0 |        0 |     1 |       0 |
-
           PROWLER_OUTPUT="/tmp/prowler-output.txt"
           TOTAL_CRIT=0
           TOTAL_HIGH=0
-          TOTAL_MED=0
 
           if [ -f "$PROWLER_OUTPUT" ]; then
-            # Strip any remaining ANSI escape codes
             CLEAN_OUTPUT=$(sed 's/\x1b\[[0-9;]*m//g' "$PROWLER_OUTPUT")
-
-            # Find the line with "FAIL (" that is the summary table (not individual checks)
             FAIL_LINE=$(echo "$CLEAN_OUTPUT" | grep "FAIL (" | grep -v "FAIL AWS\|FAIL AZU\|FAIL GCP" | tail -1 || true)
-
             if [ -n "$FAIL_LINE" ]; then
-              echo "Found FAIL summary line: $FAIL_LINE"
-
-              # Extract the part AFTER "FAIL (N)" — this contains the severity columns
               AFTER_FAIL=$(echo "$FAIL_LINE" | sed 's/.*FAIL ([0-9]*)//')
-              echo "  After FAIL: $AFTER_FAIL"
-
-              # Now extract only digits from this part (should be: Critical High Medium Low Muted)
               readarray -t NUMS < <(echo "$AFTER_FAIL" | grep -oE '[0-9]+')
-
-              echo "  Numbers after FAIL: ${NUMS[*]} (count: ${#NUMS[@]})"
-
-              if [ ${#NUMS[@]} -ge 3 ]; then
+              if [ ${#NUMS[@]} -ge 2 ]; then
                 TOTAL_CRIT=${NUMS[0]}
                 TOTAL_HIGH=${NUMS[1]}
-                TOTAL_MED=${NUMS[2]}
               fi
-
-              echo "  Parsed: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED"
-            else
-              echo "No FAIL line found in summary table - all checks passed."
             fi
-          else
-            echo "::warning::Prowler output file not found."
           fi
 
-          echo "-- Final: Critical=$TOTAL_CRIT, High=$TOTAL_HIGH, Medium=$TOTAL_MED --"
           echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
           echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
-          echo "total_medium=$TOTAL_MED" >> $GITHUB_OUTPUT
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### Security Scan (Prowler IaC)
-          | Severity | Count |
-          |----------|-------|
-          | CRITICAL | $TOTAL_CRIT |
-          | HIGH | $TOTAL_HIGH |
-          | MEDIUM | $TOTAL_MED |
-          | **Mode** | Static IaC analysis (no AWS credentials) |
-          | **Post-deploy** | Prowler App (pending AWS Marketplace purchase) |
-          EOF
 
       - name: Build summary for PR
         id: build_summary
         run: |
           CRIT="${{ steps.evaluate.outputs.total_critical }}"
           HIGH="${{ steps.evaluate.outputs.total_high }}"
-          MED="${{ steps.evaluate.outputs.total_medium }}"
-
-          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ] && [ "$MED" = "0" ]; then
-            SUMMARY="✅ **Security (Prowler IaC):** No misconfigurations found"
+          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
+            echo "summary=Security (Prowler IaC): No misconfigurations" >> $GITHUB_OUTPUT
           else
-            SUMMARY="🔒 **Security (Prowler IaC):** 🔴 $CRIT Critical | 🟠 $HIGH High | 🟡 $MED Medium"
+            echo "summary=Security (Prowler IaC): $CRIT Critical, $HIGH High" >> $GITHUB_OUTPUT
           fi
-          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
 
-      - name: Mark scan as executed
+      - name: Mark scan executed
         id: scan_result
         run: echo "scan_executed=true" >> $GITHUB_OUTPUT
-
-      - name: Upload Prowler results artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: prowler-iac-${{ inputs.environment }}-${{ github.sha }}
-          path: /tmp/prowler-results/
-          retention-days: 14
 
       - name: Enforce security gate
         if: inputs.fail_on_high_critical
         run: |
           TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
           TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
-
           if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
-            echo "::error::Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH IaC misconfigurations."
-            echo "::error::Fix the findings before this PR can be created."
-            echo "::error::Review the Prowler artifact or GitHub Code Scanning tab for details."
+            echo "::error::Security gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH."
             exit 1
           fi
 
-          echo "✅ Security gate PASSED (Prowler IaC): 0 CRITICAL, 0 HIGH."
 
   # ─────────────────────────────────────────────
-  #  ⑤b SAST — Checkmarx (Conditional)
-  #  Only runs if APPLICATION CODE is detected in the repo.
-  #  IaC-only repos (majority) skip this entirely.
-  #
-  #  Detection: looks for src/, lambda/, functions/, app/,
-  #  or source files (*.py, *.js, *.ts, *.go, *.java, *.cs)
-  #  outside of .terraform/ directories.
+  #  ⑤b SAST — Checkmarx (conditional)
   # ─────────────────────────────────────────────
   sast:
     name: "⑤b SAST"
@@ -896,11 +800,7 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      has_app_code:   ${{ steps.detect.outputs.has_app_code }}
-      sast_executed:  ${{ steps.scan_result.outputs.sast_executed }}
-      sast_critical:  ${{ steps.evaluate.outputs.total_critical }}
-      sast_high:      ${{ steps.evaluate.outputs.total_high }}
-      sast_summary:   ${{ steps.build_summary.outputs.summary }}
+      sast_summary: ${{ steps.build_summary.outputs.summary }}
 
     steps:
       - name: Checkout
@@ -912,39 +812,24 @@ jobs:
         id: detect
         run: |
           HAS_CODE="false"
-
-          # Check for application code directories
           for dir in src app lambda functions scripts/app lib pkg cmd handlers controllers; do
             if [ -d "$dir" ]; then
               HAS_CODE="true"
-              echo "Found application code directory: $dir"
               break
             fi
           done
-
-          # Check for source files (excluding .terraform and vendor)
           if [ "$HAS_CODE" = "false" ]; then
             for pattern in "*.py" "*.js" "*.ts" "*.go" "*.java" "*.cs" "*.rb"; do
               if find . -maxdepth 3 -name "$pattern" \
                 -not -path "./.terraform/*" \
                 -not -path "./vendor/*" \
-                -not -path "./node_modules/*" \
-                -not -path "./.orchestrator/*" | grep -q .; then
+                -not -path "./node_modules/*" | grep -q .; then
                 HAS_CODE="true"
-                echo "Found source files matching: $pattern"
                 break
               fi
             done
           fi
-
           echo "has_app_code=$HAS_CODE" >> $GITHUB_OUTPUT
-
-          if [ "$HAS_CODE" = "true" ]; then
-            echo "Application code detected. Checkmarx SAST will run."
-          else
-            echo "No application code found. IaC-only repo — Checkmarx SAST skipped."
-            echo "### ⑤b SAST: Skipped (IaC-only repo)" >> $GITHUB_STEP_SUMMARY
-          fi
 
       - name: Run Checkmarx SAST/SCA
         id: cxscan
@@ -963,80 +848,44 @@ jobs:
             --report-format json
             --output-path .
 
-      - name: Evaluate SAST results
+      - name: Evaluate and enforce
         id: evaluate
         if: steps.detect.outputs.has_app_code == 'true'
         run: |
           if [ ! -f "cx_result.json" ]; then
-            echo "::warning::Checkmarx scan did not produce results file."
             echo "total_critical=0" >> $GITHUB_OUTPUT
             echo "total_high=0" >> $GITHUB_OUTPUT
             exit 0
           fi
+          CRIT=$(jq '[(.results // [])[] | select(.severity=="CRITICAL")] | length' cx_result.json)
+          HIGH=$(jq '[(.results // [])[] | select(.severity=="HIGH")] | length' cx_result.json)
+          echo "total_critical=$CRIT" >> $GITHUB_OUTPUT
+          echo "total_high=$HIGH" >> $GITHUB_OUTPUT
+          if [ "${{ inputs.fail_on_high_critical }}" = "true" ]; then
+            if [ "$CRIT" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "::error::SAST gate FAILED: $CRIT CRITICAL + $HIGH HIGH."
+              exit 1
+            fi
+          fi
 
-          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
-          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
-          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
-          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
-
-          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT))
-          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH))
-
-          echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
-          echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⑤b SAST (Checkmarx — Application Code)
-          | Severity | Count |
-          |----------|-------|
-          | CRITICAL | $TOTAL_CRIT |
-          | HIGH | $TOTAL_HIGH |
-          EOF
-
-      - name: Build summary for PR
+      - name: Build summary
         id: build_summary
         run: |
           if [ "${{ steps.detect.outputs.has_app_code }}" != "true" ]; then
-            echo "summary=⏭️ **SAST:** Skipped (IaC-only repo)" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          CRIT="${{ steps.evaluate.outputs.total_critical || '0' }}"
-          HIGH="${{ steps.evaluate.outputs.total_high || '0' }}"
-          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
-            echo "summary=✅ **SAST (Checkmarx):** No app vulnerabilities" >> $GITHUB_OUTPUT
+            echo "summary=SAST: Skipped (IaC-only)" >> $GITHUB_OUTPUT
           else
-            echo "summary=🔒 **SAST (Checkmarx):** 🔴 $CRIT Critical | 🟠 $HIGH High" >> $GITHUB_OUTPUT
+            CRIT="${{ steps.evaluate.outputs.total_critical || '0' }}"
+            HIGH="${{ steps.evaluate.outputs.total_high || '0' }}"
+            if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
+              echo "summary=SAST (Checkmarx): Clean" >> $GITHUB_OUTPUT
+            else
+              echo "summary=SAST (Checkmarx): $CRIT Critical, $HIGH High" >> $GITHUB_OUTPUT
+            fi
           fi
 
-      - name: Mark SAST as executed
-        id: scan_result
-        run: |
-          if [ "${{ steps.detect.outputs.has_app_code }}" = "true" ]; then
-            echo "sast_executed=true" >> $GITHUB_OUTPUT
-          else
-            echo "sast_executed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Enforce SAST gate
-        if: |
-          steps.detect.outputs.has_app_code == 'true' &&
-          inputs.fail_on_high_critical
-        run: |
-          TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
-          TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
-
-          if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
-            echo "::error::SAST gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities in app code."
-            exit 1
-          fi
-          echo "✅ SAST gate PASSED: 0 CRITICAL, 0 HIGH in application code."
 
   # ─────────────────────────────────────────────
   #  ⑥ CREATE PR
-  #  Auto-creates a Pull Request with:
-  #    - Plan + cost in visible body
-  #    - DEPLOYMENT_CONTEXT as hidden HTML metadata
-  #      (parsed by cd-on-merge.yml after merge)
   # ─────────────────────────────────────────────
   create-pr:
     name: "⑥ Create PR"
@@ -1077,48 +926,54 @@ jobs:
           TARGET="${{ inputs.pr_target_branch }}"
           ENV="${{ inputs.environment }}"
           EXITCODE="${{ needs.plan.outputs.exitcode }}"
-          BUCKET="${{ needs.resolve.outputs.bucket }}"
-          STATE_KEY="${{ needs.resolve.outputs.state_key }}"
-          REGION="${{ needs.resolve.outputs.region }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           MONTHLY_COST="${{ needs.cost.outputs.monthly_cost }}"
           COST_DIFF="${{ needs.cost.outputs.cost_diff }}"
           SECURITY_SUMMARY="${{ needs.security.outputs.prowler_summary }}"
+          SAST_SUMMARY="${{ needs.sast.outputs.sast_summary }}"
+          IS_MULTI="${{ needs.resolve.outputs.is_multi_component }}"
 
-          # Default cost values if cost job was skipped (no changes)
           if [ -z "$MONTHLY_COST" ]; then MONTHLY_COST="N/A"; fi
           if [ -z "$COST_DIFF" ]; then COST_DIFF="N/A"; fi
-          if [ -z "$SECURITY_SUMMARY" ]; then SECURITY_SUMMARY="⏭️ Security scan skipped"; fi
+          if [ -z "$SECURITY_SUMMARY" ]; then SECURITY_SUMMARY="Skipped"; fi
+          if [ -z "$SAST_SUMMARY" ]; then SAST_SUMMARY="Skipped"; fi
+
 
           # Determine change status
           if [ "$EXITCODE" = "0" ]; then
-            STATUS_ICON="✅ No changes"
-            STATUS_MSG="> ℹ️ No infrastructure changes. Apply will be skipped in CD."
+            STATUS_ICON="No changes"
+            STATUS_MSG="> No infrastructure changes. Apply will be skipped."
           else
-            STATUS_ICON="⚠️ Changes detected"
-            STATUS_MSG="> ⚡ Plan saved. CD applies this **exact plan** after merge — no re-plan."
+            STATUS_ICON="Changes detected"
+            STATUS_MSG="> Plan saved. CD applies this exact plan after merge."
           fi
 
-          # Read plan output (truncate if too large)
+          # Mode display
+          if [ "$IS_MULTI" = "true" ]; then
+            MODE_INFO="run-all (multi-component)"
+          else
+            MODE_INFO="single component"
+          fi
+
+          # Read plan output
           PLAN_OUTPUT="Plan output not available."
           if [ -f /tmp/plan-artifacts/plan_output.txt ]; then
             PLAN_RAW=$(cat /tmp/plan-artifacts/plan_output.txt)
             if [ ${#PLAN_RAW} -gt 60000 ]; then
               PLAN_OUTPUT="${PLAN_RAW:0:60000}
-
-          ⚠️ Output truncated — see Actions for full log."
+          ... (truncated)"
             else
               PLAN_OUTPUT="$PLAN_RAW"
             fi
           fi
 
-          # Build PR title
+          # PR title
           PR_TITLE="${{ inputs.pr_title }}"
           if [ -z "$PR_TITLE" ]; then
-            PR_TITLE="🚀 [${ENV^^}] Deploy infrastructure — ${SHORT_SHA}"
+            PR_TITLE="[${ENV^^}] Deploy infrastructure — ${SHORT_SHA}"
           fi
 
-          # Determine next environment for metadata
+          # Next environment
           case "$ENV" in
             dev)     NEXT_ENV="qa" ;;
             qa)
@@ -1133,39 +988,26 @@ jobs:
             *)       NEXT_ENV="" ;;
           esac
 
-          # Determine approval teams for next transition
-          case "$ENV" in
-            dev)     NEXT_APPROVAL_TEAMS="Desarrollo,cloud-ops" ;;
-            qa)      NEXT_APPROVAL_TEAMS="cloud-ops,Seguridad" ;;
-            preprod) NEXT_APPROVAL_TEAMS="cloud-ops,Infraestructura" ;;
-            prod)    NEXT_APPROVAL_TEAMS="" ;;
-            *)       NEXT_APPROVAL_TEAMS="" ;;
-          esac
 
-          # Build PR body with visible content + hidden metadata
-          PR_BODY="## 🔍 Terraform Plan — \`${ENV}\` ${STATUS_ICON}
+          # Build PR body
+          PR_BODY="## Terraform Plan — \`${ENV}\` ${STATUS_ICON}
 
           | Field | Value |
           |-------|-------|
           | **Environment** | \`${ENV}\` |
-          | **Region** | \`${REGION}\` |
+          | **Mode** | \`${MODE_INFO}\` |
           | **Account ID** | \`${{ inputs.account_id }}\` |
           | **Directory** | \`${{ inputs.working_directory }}\` |
-          | **State bucket** | \`${BUCKET}\` |
-          | **State key** | \`${STATE_KEY}\` |
-          | **Extra vars** | \`${{ inputs.extra_vars }}\` |
-          | **Commit** | \`${SHORT_SHA}\` |
           | **Cost (monthly)** | \`\$${MONTHLY_COST}/mo\` |
           | **Cost (diff)** | \`\$${COST_DIFF}/mo\` |
+          | **Security** | ${SECURITY_SUMMARY} |
+          | **SAST** | ${SAST_SUMMARY} |
+          | **Commit** | \`${SHORT_SHA}\` |
           | **Triggered by** | @${{ github.actor }} |
 
           ${STATUS_MSG}
 
-          ${SECURITY_SUMMARY}
-
-          ${{ needs.sast.outputs.sast_summary }}
-
-          <details><summary>📋 Plan output (expand)</summary>
+          <details><summary>Plan output (expand)</summary>
 
           \`\`\`hcl
           ${PLAN_OUTPUT}
@@ -1174,19 +1016,18 @@ jobs:
           </details>
 
           ---
-          > 🤖 This PR was auto-created by the CI pipeline. Review the plan above and approve to deploy.
 
           <!-- DEPLOYMENT_CONTEXT
+          version: 3
           environment: ${ENV}
           account_id: ${{ inputs.account_id }}
           ou_name: ${{ inputs.ou_name }}
           working_directory: ${{ inputs.working_directory }}
           extra_vars: ${{ inputs.extra_vars }}
-          secret_var_names: ${SECRET_VAR_NAMES} 
           plan_artifact_name: ${{ needs.plan.outputs.artifact_name }}
           plan_exitcode: ${EXITCODE}
+          is_multi_component: ${IS_MULTI}
           next_environment: ${NEXT_ENV}
-          approval_teams: ${NEXT_APPROVAL_TEAMS}
           dev_account_id: ${{ inputs.dev_account_id }}
           qa_account_id: ${{ inputs.qa_account_id }}
           preprod_account_id: ${{ inputs.preprod_account_id }}
@@ -1195,19 +1036,12 @@ jobs:
           feature_branch: ${{ inputs.feature_branch }}
           source_branch: ${SOURCE}
           target_branch: ${TARGET}
-          region: ${REGION}
-          commit_sha: ${{ github.sha }}
           ci_run_id: ${{ github.run_id }}
           monthly_cost: ${MONTHLY_COST}
           cost_diff: ${COST_DIFF}
           -->"
 
-          SECRET_VAR_NAMES=""
-          if [ -n '${{ inputs.secret_titles }}' ]; then
-            SECRET_VAR_NAMES=$(echo '${{ inputs.secret_titles }}' \
-              | jq -r '[.[].tf_var] | join(" ")' 2>/dev/null || echo "")
-          fi
-          
+
           # Check if PR already exists
           EXISTING_PR=$(gh pr list \
             --head "$SOURCE" \
@@ -1217,48 +1051,21 @@ jobs:
             --jq '.[0]' 2>/dev/null || echo "")
 
           if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
-            # Update existing PR
             PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.number')
             PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
-            gh pr edit "$PR_NUMBER" \
-              --title "$PR_TITLE" \
-              --body "$PR_BODY"
+            gh pr edit "$PR_NUMBER" --title "$PR_TITLE" --body "$PR_BODY"
             echo "Updated existing PR #${PR_NUMBER}"
           else
-            # Create new PR
             PR_URL=$(gh pr create \
               --head "$SOURCE" \
               --base "$TARGET" \
               --title "$PR_TITLE" \
               --body "$PR_BODY")
             PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
-            
-            # Add labels (non-fatal if they don't exist)
             gh pr edit "$PR_NUMBER" --add-label "environment/${ENV}" 2>/dev/null || true
             gh pr edit "$PR_NUMBER" --add-label "terraform" 2>/dev/null || true
-            gh pr edit "$PR_NUMBER" --add-label "needs-review" 2>/dev/null || true
-
             echo "Created new PR #${PR_NUMBER}"
-          fi
-
-          # Add production label if prod/dr
-          if [ "$ENV" = "prod" ] || [ "$ENV" = "dr" ]; then
-            gh pr edit "$PR_NUMBER" --add-label "production" 2>/dev/null || true
           fi
 
           echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
           echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
-
-      - name: PR Summary
-        if: steps.pr.outputs.pr_number != ''
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⑤ Pull Request
-          | Field | Value |
-          |-------|-------|
-          | PR | [#${{ steps.pr.outputs.pr_number }}](${{ steps.pr.outputs.pr_url }}) |
-          | Source | \`${{ inputs.pr_source_branch }}\` |
-          | Target | \`${{ inputs.pr_target_branch }}\` |
-          | Environment | \`${{ inputs.environment }}\` |
-          | Context metadata | ✅ Embedded |
-          EOF

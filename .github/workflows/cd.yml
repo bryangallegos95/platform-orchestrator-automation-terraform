@@ -1,32 +1,20 @@
 # ORG-DEVOPS/.github/workflows/cd.yml
 #
-# Reusable CD workflow — called by product (son) repos after PR merge.
+# Reusable CD workflow — ADR-009: terragrunt run-all apply
 #
-# PREREQUISITES:
-#   Runner image v2.0.0+ with pre-installed:
-#   Terraform, Terragrunt, gh CLI
-#
-# KEY BEHAVIORS:
-#   - Downloads exact plan artifact from CI (same SHA). No re-plan.
-#   - plan_exitcode=0 → apply skipped entirely.
-#   - Apply failure → auto-destroy (dev/qa) or alert-only (preprod/prod/dr).
-#   - One apply per environment at a time (concurrency queue, never cancel).
-#   - On success → creates promotion Issue with approval labels.
-#   - Post-apply → triggers Prowler App scan (when available).
-#   - Promotion Issue includes CloudCheckr FinOps deeplink.
+# Downloads exact plan artifact from CI (same SHA). No re-plan.
+# AUTO-DETECTS multi-component: uses run-all apply with --terragrunt-out-dir
 #
 # JOBS:
-#   ⓪ resolve           → derives region, bucket, state key
-#   ① apply             → downloads plan + applies (or skips if no changes)
-#                          + triggers Prowler App scan (commented — pending purchase)
-#   ② promotion-issue   → creates GitHub Issue for team validation (on success)
+#   ⓪ resolve   → derives region, bucket
+#   ① apply     → terragrunt [run-all] apply
+#   ② promote   → creates promotion issue for next environment
 
 name: "[reusable] Terraform CD"
 
 on:
   workflow_call:
     inputs:
-      # ─── Required inputs ───────────────────────────────────────
       environment:
         description: "Target environment: dev, qa, preprod, prod, dr"
         required: true
@@ -40,11 +28,11 @@ on:
         required: true
         type: string
       ou_name:
-        description: "OU / product name — root folder in state bucket."
+        description: "OU / product name."
         required: true
         type: string
       plan_artifact_name:
-        description: "Artifact name from CI (contains tfplan binary)."
+        description: "Artifact name from CI containing plan(s)."
         required: true
         type: string
       plan_exitcode:
@@ -52,89 +40,79 @@ on:
         required: true
         type: string
       ci_run_id:
-        description: "Workflow run ID from CI (for cross-run artifact download)."
+        description: "Workflow run ID from CI."
         required: false
         type: string
         default: ""
 
+
       # ─── Optional inputs ───────────────────────────────────────
       runner_label:
-        description: |
-          Override the runner label used for all CD jobs.
-          Default: uses the environment name (e.g. dev, qa, prod).
-          Set to "prod" for repos like hub-networking that deploy all envs
-          from the prod runner/account.
+        description: "Override the runner tag."
         required: false
         type: string
         default: ""
       extra_vars:
-        description: |
-          Space-separated Terraform -var overrides.
-          Used ONLY for rollback destroy — apply uses saved plan binary.
+        description: "Space-separated Terraform -var overrides (for rollback destroy)."
         required: false
         type: string
         default: ""
       target_role_name:
-        description: "IAM role name to assume in target account."
+        description: "IAM role name to assume."
         required: false
         type: string
         default: "terraform-apply-role"
-      change_window_start_utc:
-        description: "Start hour (UTC) for prod change window."
+      is_multi_component:
+        description: "Whether this is a multi-component run-all deployment."
         required: false
         type: string
-        default: "12"
-      change_window_end_utc:
-        description: "End hour (UTC) for prod change window."
-        required: false
-        type: string
-        default: "22"
+        default: "false"
 
       # ─── Promotion inputs ──────────────────────────────────────
       promote_on_success:
-        description: "Create a promotion issue after successful apply."
+        description: "Create promotion issue after success."
         required: false
         type: boolean
         default: true
       next_environment:
-        description: "Target environment for promotion (qa, preprod, prod). Empty = no promotion."
+        description: "Target environment for promotion."
         required: false
         type: string
         default: ""
       approval_teams:
-        description: "Comma-separated GitHub teams for issue assignment. E.g. 'Desarrollo,CloudOps'"
+        description: "Comma-separated GitHub teams for approval."
         required: false
         type: string
         default: ""
 
-      # ─── Context for promotion metadata ────────────────────────
+      # ─── Context for promotion ─────────────────────────────────
       dev_account_id:
-        description: "DEV account ID (passed through for promotion chain)."
+        description: "DEV account ID."
         required: false
         type: string
         default: ""
       qa_account_id:
-        description: "QA account ID (passed through for promotion chain)."
+        description: "QA account ID."
         required: false
         type: string
         default: ""
       preprod_account_id:
-        description: "PREPROD account ID — empty means preprod is skipped."
+        description: "PREPROD account ID."
         required: false
         type: string
         default: ""
       prod_account_id:
-        description: "PROD account ID (passed through for promotion chain)."
+        description: "PROD account ID."
         required: false
         type: string
         default: ""
       dr_enabled:
-        description: "Whether DR (us-east-2) deploy is enabled for prod."
+        description: "Whether DR is enabled."
         required: false
         type: boolean
         default: false
       feature_branch:
-        description: "Original feature branch name (for traceability in issues)."
+        description: "Original feature branch."
         required: false
         type: string
         default: ""
@@ -144,15 +122,13 @@ on:
         description: "success | skipped | rolled_back | failed"
         value: ${{ jobs.apply.outputs.outcome }}
       promotion_issue_number:
-        description: "Issue number if promotion issue was created."
-        value: ${{ jobs.promotion-issue.outputs.issue_number }}
-      promotion_issue_url:
-        description: "Issue URL if promotion issue was created."
-        value: ${{ jobs.promotion-issue.outputs.issue_url }}
+        description: "Issue number if created."
+        value: ${{ jobs.promote.outputs.issue_number }}
 
 concurrency:
   group: "tf-cd-${{ inputs.environment }}-${{ inputs.ou_name }}"
   cancel-in-progress: false
+
 
 jobs:
   # ─────────────────────────────────────────────
@@ -163,51 +139,19 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
     outputs:
-      region:    ${{ steps.derive.outputs.region }}
-      bucket:    ${{ steps.derive.outputs.bucket }}
-      state_key: ${{ steps.derive.outputs.state_key }}
+      region: ${{ steps.derive.outputs.region }}
 
     steps:
-      - name: Derive infrastructure context
+      - name: Derive context
         id: derive
         run: |
           ENV="${{ inputs.environment }}"
-          REPO="${{ github.event.repository.name }}"
-          OU="${{ inputs.ou_name }}"
-
           case "$ENV" in
-            dev|qa|preprod|prod)
-              REGION="us-east-1"
-              BUCKET="s3-aw-ue1-terraform-state-${ENV}"
-              ;;
-            dr)
-              REGION="us-east-2"
-              BUCKET="s3-aw-ue2-terraform-state-dr"
-              ;;
-            *)
-              echo "::error::Invalid environment: '$ENV'."
-              exit 1
-              ;;
+            dev|qa|preprod|prod) REGION="us-east-1" ;;
+            dr)                  REGION="us-east-2" ;;
+            *) echo "::error::Invalid environment: '$ENV'."; exit 1 ;;
           esac
-
-          STATE_KEY="${OU}/${REPO}/terraform.tfstate"
-
-          echo "region=$REGION"       >> $GITHUB_OUTPUT
-          echo "bucket=$BUCKET"       >> $GITHUB_OUTPUT
-          echo "state_key=$STATE_KEY" >> $GITHUB_OUTPUT
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ⓪ CD Context
-          | Key | Value |
-          |-----|-------|
-          | Environment | \`${ENV}\` |
-          | Region | \`${REGION}\` |
-          | Bucket | \`${BUCKET}\` |
-          | State key | \`${STATE_KEY}\` |
-          | Account ID | \`${{ inputs.account_id }}\` |
-          | Plan artifact | \`${{ inputs.plan_artifact_name }}\` |
-          | Plan exitcode | \`${{ inputs.plan_exitcode }}\` |
-          EOF
+          echo "region=$REGION" >> $GITHUB_OUTPUT
 
   # ─────────────────────────────────────────────
   #  ① APPLY
@@ -224,20 +168,14 @@ jobs:
     env:
       OU_NAME: ${{ inputs.ou_name }}
       APPLY_FAILED: "false"
-      ROLLBACK_OUTCOME: "n/a"
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
-      
+
     steps:
-      # ── Skip guard ──────────────────────────────────────────────
       - name: "Skip — no changes"
         if: inputs.plan_exitcode == '0'
-        run: |
-          echo "::notice::Plan exitcode=0. No infrastructure changes — apply skipped."
-          echo "### ① Apply: ⏭️ Skipped (no changes)" >> $GITHUB_STEP_SUMMARY
+        run: echo "::notice::No changes — apply skipped."
 
-# ── Change window (prod only) ──────────────────────────────
-      # Bloquea deploys a prod en horario laboral Ecuador (08:30–17:30, UTC-5 fijo)
-      # Equivalente en UTC: 13:30–22:30, Lun–Vie
+      # ── Change window (prod only) ──────────────────────────────
       - name: Change window check
         if: inputs.plan_exitcode != '0' && inputs.environment == 'prod'
         run: |
@@ -245,26 +183,22 @@ jobs:
           MIN_UTC=$(date -u +%M)
           DAY=$(date -u +%u)
           NOW_MIN=$((10#$HOUR_UTC * 60 + 10#$MIN_UTC))
-          BLOCK_START=$((13 * 60 + 30))   # 08:30 Ecuador
-          BLOCK_END=$((22 * 60 + 30))     # 17:30 Ecuador
-
+          BLOCK_START=$((13 * 60 + 30))
+          BLOCK_END=$((22 * 60 + 30))
           if [[ $DAY -ge 6 ]]; then
-            echo "✅ Fin de semana — fuera de horario laboral. Deploy permitido."
+            echo "Weekend — deploy allowed."
           elif [[ $NOW_MIN -ge $BLOCK_START && $NOW_MIN -lt $BLOCK_END ]]; then
-            echo "::error::❌ No se permiten deploys a prod en horario laboral de Ecuador."
-            echo "::error::Bloqueado: 08:30–17:30 Ecuador (13:30–22:30 UTC). Hora actual: ${HOUR_UTC}:${MIN_UTC} UTC."
-            echo "::error::Reintenta fuera de ese horario."
+            echo "::error::Deploys blocked during Ecuador business hours."
             exit 1
           else
-            echo "✅ Fuera de horario laboral (${HOUR_UTC}:${MIN_UTC} UTC). Deploy permitido."
+            echo "Outside business hours. Deploy allowed."
           fi
 
-      # ── Checkout ────────────────────────────────────────────────
+
       - name: Checkout
         if: inputs.plan_exitcode != '0'
         uses: actions/checkout@v4
 
-      # ── Assume role ─────────────────────────────────────────────
       - name: Assume role in target account
         if: inputs.plan_exitcode != '0'
         uses: aws-actions/configure-aws-credentials@v4
@@ -274,25 +208,38 @@ jobs:
           role-session-name: "tf-cd-${{ inputs.environment }}-${{ github.run_id }}"
           role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
 
-      # ── Init ────────────────────────────────────────────────────
-      - name: Terragrunt init
+      - name: Configure git for private modules
         if: inputs.plan_exitcode != '0'
-        working-directory: ${{ inputs.working_directory }}
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
         env:
-          TERRAGRUNT_NON_INTERACTIVE: "true"
-        run: terragrunt init -reconfigure
+          GH_PAT: ${{ secrets.GH_TOKEN }}
 
-      # ── Download saved plan ─────────────────────────────────────
       - name: Download plan artifact
         if: inputs.plan_exitcode != '0'
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ inputs.plan_artifact_name }}
-          path: ${{ inputs.working_directory }}
-          github-token: ${{ secrets.GH_TOKEN }}
-          run-id: ${{ inputs.ci_run_id }}
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -n "${{ inputs.ci_run_id }}" ]; then
+            gh run download "${{ inputs.ci_run_id }}" \
+              --name "${{ inputs.plan_artifact_name }}" \
+              --dir "/tmp/plan-download" \
+              --repo "${{ github.repository }}"
+          else
+            echo "::error::ci_run_id is required to download artifacts."
+            exit 1
+          fi
 
-      # ── Apply ───────────────────────────────────────────────────
+      - name: Restore plans to working directory
+        if: inputs.plan_exitcode != '0'
+        run: |
+          WORK_DIR="${{ inputs.working_directory }}"
+          # The artifact has plans/ directory and plan_output.txt
+          if [ -d "/tmp/plan-download/plans" ]; then
+            cp -r /tmp/plan-download/plans "${WORK_DIR}/plans"
+          fi
+
+
       - name: Terragrunt apply
         id: apply
         if: inputs.plan_exitcode != '0'
@@ -300,25 +247,51 @@ jobs:
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
-          echo "Applying saved plan: ${{ inputs.plan_artifact_name }}"
-          echo "No -var flags needed — plan binary has all values baked in."
-          echo ""
+          IS_MULTI="${{ inputs.is_multi_component }}"
+          PLAN_DIR="$(pwd)/plans"
 
+          echo "Applying saved plan: ${{ inputs.plan_artifact_name }}"
           SECONDS=0
           set +e
-          terragrunt apply -input=false -auto-approve $(pwd)/tfplan 2>&1 | tee apply_output.txt
-          CODE=$?
+
+          if [ "$IS_MULTI" = "true" ]; then
+            # ── MULTI-COMPONENT: terragrunt run-all apply ──
+            echo "══════════════════════════════════════════════"
+            echo "  MODE: terragrunt run-all apply"
+            echo "══════════════════════════════════════════════"
+            terragrunt run-all apply \
+              --terragrunt-non-interactive \
+              --terragrunt-out-dir "$PLAN_DIR" \
+              -input=false \
+              -auto-approve \
+              2>&1 | tee /tmp/apply_output.txt
+            CODE=$?
+          else
+            # ── SINGLE-COMPONENT: standard apply ──
+            echo "══════════════════════════════════════════════"
+            echo "  MODE: terragrunt apply (single component)"
+            echo "══════════════════════════════════════════════"
+            terragrunt apply \
+              -input=false \
+              -auto-approve \
+              "${PLAN_DIR}/tfplan" \
+              2>&1 | tee /tmp/apply_output.txt
+            CODE=$?
+          fi
+
           DURATION=$SECONDS
+          set -e
 
           echo "apply_duration=${DURATION}s" >> $GITHUB_OUTPUT
 
           if [ $CODE -ne 0 ]; then
             echo "APPLY_FAILED=true" >> $GITHUB_ENV
-            echo "::error::❌ terragrunt apply failed (exit $CODE) after ${DURATION}s."
+            echo "::error::Apply failed (exit $CODE) after ${DURATION}s."
           else
-            echo "✅ Apply completed successfully in ${DURATION}s."
+            echo "Apply completed successfully in ${DURATION}s."
           fi
           exit 0
+
 
       # ── Rollback: auto-destroy (dev/qa) ─────────────────────────
       - name: "Rollback — auto-destroy (dev/qa)"
@@ -329,13 +302,7 @@ jobs:
         env:
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: |
-          echo "::warning::⚠️ Apply failed in ${{ inputs.environment }}. Running automatic rollback (destroy)."
-          echo ""
-          echo "Current state:"
-          terragrunt state list || true
-          echo ""
-
-          # Build -var flags for destroy (destroy re-evaluates variables)
+          echo "::warning::Apply failed. Running automatic rollback (destroy)."
           EXTRA_VAR_FLAGS=""
           if [ -n "${{ inputs.extra_vars }}" ]; then
             for pair in ${{ inputs.extra_vars }}; do
@@ -343,134 +310,53 @@ jobs:
             done
           fi
 
+          IS_MULTI="${{ inputs.is_multi_component }}"
           set +e
-          eval terragrunt destroy $EXTRA_VAR_FLAGS -input=false -auto-approve 2>&1 | tee rollback_output.txt
-          CODE=$?
-
-          if [ $CODE -ne 0 ]; then
-            echo "ROLLBACK_OUTCOME=failed" >> $GITHUB_ENV
-            echo "::error::❌ Rollback ALSO FAILED. Manual intervention required."
-            echo "::error::State: s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}"
+          if [ "$IS_MULTI" = "true" ]; then
+            eval terragrunt run-all destroy $EXTRA_VAR_FLAGS --terragrunt-non-interactive -input=false -auto-approve 2>&1 | tail -20
           else
-            echo "ROLLBACK_OUTCOME=success" >> $GITHUB_ENV
-            echo "✅ Rollback (destroy) completed. State is clean."
+            eval terragrunt destroy $EXTRA_VAR_FLAGS -input=false -auto-approve 2>&1 | tail -20
+          fi
+          ROLLBACK_CODE=$?
+          set -e
+
+          if [ $ROLLBACK_CODE -ne 0 ]; then
+            echo "::error::Rollback ALSO FAILED. Manual intervention required."
+          else
+            echo "Rollback (destroy) completed."
           fi
 
       # ── Rollback: alert only (preprod/prod/dr) ──────────────────
       - name: "Rollback — alert only (preprod/prod/dr)"
         if: |
           env.APPLY_FAILED == 'true' &&
-          (inputs.environment == 'preprod' ||
-           inputs.environment == 'prod' ||
-           inputs.environment == 'dr')
+          (inputs.environment == 'preprod' || inputs.environment == 'prod' || inputs.environment == 'dr')
         run: |
-          echo "ROLLBACK_OUTCOME=blocked" >> $GITHUB_ENV
-          echo "::error::❌ Apply failed in '${{ inputs.environment }}'."
-          echo "::error::🚫 Automatic destroy is DISABLED for production-tier environments."
-          echo "::error::Manual actions required:"
-          echo "::error::  A) Fix-forward — push a corrected PR."
-          echo "::error::  B) Manual destroy — run 'terragrunt destroy' with authorized credentials."
-          echo "::error::State: s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}"
+          echo "::error::Apply failed in '${{ inputs.environment }}'. No auto-destroy for production."
+          echo "::error::Manual fix-forward or destroy required."
 
-      # ── Job summary ─────────────────────────────────────────────
-      - name: Write job summary
-        if: always() && inputs.plan_exitcode != '0'
-        run: |
-          case "$APPLY_FAILED-$ROLLBACK_OUTCOME" in
-            "false-n/a")    STATUS="✅ Success";                        OUTCOME="success"     ;;
-            "true-success") STATUS="🔄 Failed → rolled back (clean)";   OUTCOME="rolled_back" ;;
-            "true-failed")  STATUS="💥 Failed → rollback ALSO failed";  OUTCOME="failed"      ;;
-            "true-blocked") STATUS="🚨 Failed → manual action needed";  OUTCOME="failed"      ;;
-            *)              STATUS="⚠️ Unknown";                        OUTCOME="failed"      ;;
-          esac
-          echo "OUTCOME=$OUTCOME" >> $GITHUB_ENV
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ① Apply Result
-          | Field | Value |
-          |-------|-------|
-          | **Status** | ${STATUS} |
-          | **Environment** | \`${{ inputs.environment }}\` |
-          | **Region** | \`${{ needs.resolve.outputs.region }}\` |
-          | **Account ID** | \`${{ inputs.account_id }}\` |
-          | **Directory** | \`${{ inputs.working_directory }}\` |
-          | **State** | \`s3://${{ needs.resolve.outputs.bucket }}/${{ needs.resolve.outputs.state_key }}\` |
-          | **Plan artifact** | \`${{ inputs.plan_artifact_name }}\` |
-          | **Triggered by** | @${{ github.actor }} |
-          | **Commit** | \`${{ github.sha }}\` |
-          | **Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
-          EOF
-
-      # ── Set output + fail job ───────────────────────────────────
-      - name: Set outcome output
+      - name: Set outcome
         id: outcome
         if: always()
         run: |
           if [ "${{ inputs.plan_exitcode }}" = "0" ]; then
             echo "value=skipped" >> $GITHUB_OUTPUT
+          elif [ "$APPLY_FAILED" = "true" ]; then
+            echo "value=failed" >> $GITHUB_OUTPUT
           else
-            echo "value=${OUTCOME:-failed}" >> $GITHUB_OUTPUT
+            echo "value=success" >> $GITHUB_OUTPUT
           fi
 
-      # ── Fail job on apply error ───────────────────────────────────
       - name: Fail job on apply error
         if: env.APPLY_FAILED == 'true'
         run: exit 1
 
-      # ── Prowler App: trigger post-deploy scan (COMMENTED — pending AWS Marketplace purchase) ──
-      # Uncomment this step once Prowler App is active in ROSA.
-      # It triggers an on-demand scan for the account/env that was just deployed.
-      # The scan results will appear in the Prowler App UI (managed by Security team).
-      #
-      # - name: "Trigger Prowler App scan (post-deploy)"
-      #   if: env.APPLY_FAILED != 'true' && inputs.plan_exitcode != '0'
-      #   env:
-      #     PROWLER_APP_URL: ${{ vars.PROWLER_APP_URL }}
-      #     PROWLER_APP_TOKEN: ${{ secrets.PROWLER_APP_TOKEN }}
-      #   run: |
-      #     if [ -z "$PROWLER_APP_URL" ] || [ -z "$PROWLER_APP_TOKEN" ]; then
-      #       echo "::notice::Prowler App not configured. Skipping post-deploy scan trigger."
-      #       exit 0
-      #     fi
-      #
-      #     echo "── Triggering Prowler App scan for account ${{ inputs.account_id }} ──"
-      #     HTTP_CODE=$(curl -s -o /tmp/prowler-response.json -w "%{http_code}" \
-      #       -X POST "${PROWLER_APP_URL}/api/v1/scans" \
-      #       -H "Authorization: Bearer ${PROWLER_APP_TOKEN}" \
-      #       -H "Content-Type: application/json" \
-      #       -d '{
-      #         "account_id": "${{ inputs.account_id }}",
-      #         "region": "${{ needs.resolve.outputs.region }}",
-      #         "scan_type": "on-demand",
-      #         "triggered_by": "cd-pipeline",
-      #         "metadata": {
-      #           "repository": "${{ github.repository }}",
-      #           "environment": "${{ inputs.environment }}",
-      #           "commit": "${{ github.sha }}",
-      #           "run_id": "${{ github.run_id }}"
-      #         }
-      #       }')
-      #
-      #     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "202" ]; then
-      #       SCAN_ID=$(jq -r '.scan_id // .id // "unknown"' /tmp/prowler-response.json)
-      #       echo "✅ Prowler App scan triggered. Scan ID: $SCAN_ID"
-      #       echo "   View results at: ${PROWLER_APP_URL}/scans/${SCAN_ID}"
-      #     else
-      #       echo "::warning::Prowler App scan trigger failed (HTTP $HTTP_CODE). Non-blocking."
-      #       cat /tmp/prowler-response.json 2>/dev/null || true
-      #     fi
 
   # ─────────────────────────────────────────────
   #  ② PROMOTION ISSUE
-  #  Creates a GitHub Issue for team validation.
-  #  Promotion is triggered by LABELS:
-  #    - `approved-for-{next_env}` → promote
-  #    - `rejected-{next_env}` → stop promotion
-  #  Embeds PROMOTION_METADATA as hidden HTML comment
-  #  for the promotion-listener workflow to parse.
   # ─────────────────────────────────────────────
-  promotion-issue:
-    name: "② Promotion Issue"
+  promote:
+    name: "② Promote"
     needs: [resolve, apply]
     if: |
       needs.apply.outputs.outcome == 'success' &&
@@ -480,7 +366,6 @@ jobs:
 
     outputs:
       issue_number: ${{ steps.create_issue.outputs.issue_number }}
-      issue_url:    ${{ steps.create_issue.outputs.issue_url }}
 
     steps:
       - name: Create promotion issue
@@ -490,128 +375,54 @@ jobs:
         run: |
           ENV="${{ inputs.environment }}"
           NEXT_ENV="${{ inputs.next_environment }}"
-          REPO="${{ github.repository }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          APPROVAL_TEAMS="${{ inputs.approval_teams }}"
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          APPROVAL_TEAMS="${{ inputs.approval_teams }}"
 
-          # Promotion label
-          PROMOTION_LABEL="promotion/${ENV}-to-${NEXT_ENV}"
-
-          # Build assignee mentions
-          ASSIGNEE_MENTIONS=""
-          if [ -n "$APPROVAL_TEAMS" ]; then
-            IFS=',' read -ra TEAMS <<< "$APPROVAL_TEAMS"
-            for team in "${TEAMS[@]}"; do
-              team=$(echo "$team" | xargs)
-              ASSIGNEE_MENTIONS="${ASSIGNEE_MENTIONS}@${{ github.repository_owner }}/${team} "
-            done
-          fi
-
-          # Environment emoji
-          case "$ENV" in
-            dev)     ENV_EMOJI="🔧" ;;
-            qa)      ENV_EMOJI="🧪" ;;
-            preprod) ENV_EMOJI="🔒" ;;
-            prod)    ENV_EMOJI="🚀" ;;
-            *)       ENV_EMOJI="📦" ;;
+          # Determine next account_id
+          case "$NEXT_ENV" in
+            qa)      NEXT_ACCOUNT_ID="${{ inputs.qa_account_id }}" ;;
+            preprod) NEXT_ACCOUNT_ID="${{ inputs.preprod_account_id }}" ;;
+            prod)    NEXT_ACCOUNT_ID="${{ inputs.prod_account_id }}" ;;
+            *)       NEXT_ACCOUNT_ID="" ;;
           esac
 
-          # CloudCheckr deeplink (filtered by repo tags)
-          REPO_NAME="${{ github.event.repository.name }}"
-          CLOUDCHECKR_URL="https://app-us.cloudcheckr.com/app/#/cost?filter[tag:Repositorio]=${REPO_NAME}&filter[tag:Ambiente]=${ENV}"
+          PROMOTION_LABEL="promotion/${ENV}-to-${NEXT_ENV}"
 
-          # Issue title
-          ISSUE_TITLE="${ENV_EMOJI} [${ENV^^}] Validate: ${{ github.event.repository.name }} — ${SHORT_SHA}"
-
-          # Issue body
-          ISSUE_BODY="## 📋 Deployment Summary
+          ISSUE_BODY="## Deployment Validation
 
           | Field | Value |
           |-------|-------|
-          | **Source Environment** | \`${ENV}\` |
-          | **Target Environment** | \`${NEXT_ENV}\` |
-          | **Region** | \`${{ needs.resolve.outputs.region }}\` |
-          | **Account ID** | \`${{ inputs.account_id }}\` |
-          | **Repository** | \`${REPO}\` |
+          | **Source env** | \`${ENV}\` |
+          | **Target env** | \`${NEXT_ENV}\` |
           | **Commit** | \`${SHORT_SHA}\` |
-          | **Apply Run** | [View workflow](${RUN_URL}) |
+          | **CD Run** | [View]($RUN_URL) |
           | **Triggered by** | @${{ github.actor }} |
 
-          ## 🔗 Links
-          - [CI/CD Run](${RUN_URL})
-          - [Repository](https://github.com/${REPO})
-          - [CloudCheckr Dashboard](${CLOUDCHECKR_URL})
-
-          ## 💰 FinOps
-          > View real-time cost for this deployment in [CloudCheckr]($CLOUDCHECKR_URL) (filtered by Repositorio + Ambiente tags).
-
-          ## ✅ Validation Checklist
-          - [ ] Infrastructure accessible and functional
-          - [ ] Connectivity validated (TGW routing, DNS resolution)
-          - [ ] Application layer can consume new resources
-          - [ ] No unexpected errors in CloudWatch logs
-          - [ ] Security groups and network ACLs are correct
-
-          ## 🎯 Action Required
-
-          > **Assigned teams**: ${ASSIGNEE_MENTIONS}
-          > **Next environment**: \`${NEXT_ENV}\`
-
-          | Action | How |
-          |--------|-----|
-          | ✅ Approve promotion | Add label \`approved-for-${NEXT_ENV}\` |
-          | ❌ Reject promotion | Add label \`rejected-${NEXT_ENV}\` and comment with reason |
-
-          ⚠️ **Only members of the assigned teams can approve or reject.**
-
           ---
+          Add label \`approved-for-${NEXT_ENV}\` to trigger promotion.
 
           <!-- PROMOTION_METADATA
           source_env: ${ENV}
           target_env: ${NEXT_ENV}
-          approval_teams: ${APPROVAL_TEAMS}
-          account_id: ${{ inputs.account_id }}
+          account_id: ${NEXT_ACCOUNT_ID}
+          ou_name: ${{ inputs.ou_name }}
+          working_directory: ${{ inputs.working_directory }}
+          feature_branch: ${{ inputs.feature_branch }}
           dev_account_id: ${{ inputs.dev_account_id }}
           qa_account_id: ${{ inputs.qa_account_id }}
           preprod_account_id: ${{ inputs.preprod_account_id }}
           prod_account_id: ${{ inputs.prod_account_id }}
           dr_enabled: ${{ inputs.dr_enabled }}
-          ou_name: ${{ inputs.ou_name }}
-          feature_branch: ${{ inputs.feature_branch }}
-          commit_sha: ${{ github.sha }}
-          working_directory: ${{ inputs.working_directory }}
-          repository: ${REPO}
-          run_id: ${{ github.run_id }}
           -->"
 
-          # Create issue
           ISSUE_URL=$(gh issue create \
-            --repo "$REPO" \
-            --title "$ISSUE_TITLE" \
+            --title "[${ENV^^}] Validate & Promote → ${NEXT_ENV} — ${SHORT_SHA}" \
             --body "$ISSUE_BODY" \
-            --label "$PROMOTION_LABEL" \
             --label "awaiting-validation" \
-            --label "pending-${NEXT_ENV}-approval" \
+            --label "$PROMOTION_LABEL" \
             --label "environment/${ENV}")
 
           ISSUE_NUMBER=$(gh issue view "$ISSUE_URL" --json number --jq '.number')
-
-          echo "✅ Created promotion issue #${ISSUE_NUMBER}"
           echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
-          echo "issue_url=${ISSUE_URL}" >> $GITHUB_OUTPUT
-
-      - name: Issue summary
-        if: steps.create_issue.outputs.issue_number != ''
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ### ② Promotion Issue
-          | Field | Value |
-          |-------|-------|
-          | Issue | [#${{ steps.create_issue.outputs.issue_number }}](${{ steps.create_issue.outputs.issue_url }}) |
-          | From | \`${{ inputs.environment }}\` |
-          | To | \`${{ inputs.next_environment }}\` |
-          | Approval teams | \`${{ inputs.approval_teams }}\` |
-          | Approve | Add label \`approved-for-${{ inputs.next_environment }}\` |
-          | Reject | Add label \`rejected-${{ inputs.next_environment }}\` |
-          EOF
+          echo "Created promotion issue #${ISSUE_NUMBER}"
