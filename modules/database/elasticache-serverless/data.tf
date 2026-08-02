@@ -1,19 +1,18 @@
 # modules/database/elasticache-serverless/data.tf
 #
 # VPC, subnet, and KMS key discovery. Same contract as aurora-postgresql/data.tf.
-# No IDs are passed in — everything is discovered by the tag/naming contract
+# No IDs are passed in — everything is discovered by the tag contract
 # established by modules/networking/vpc.
-# VPC discovery uses local.vpc_service (resolved from vpc_discovery_service or workload).
+# VPC discovery uses tag 'ou' = var.service (OU name, lowercase).
 
 # ── Current identity ──────────────────────────────────────────────────────────
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# ── VPC discovery (by Name tag — contract with networking/vpc module) ─────────
+# ── VPC discovery (by OU tag — decoupled from VPC naming convention) ──────────
 data "aws_vpc" "spoke" {
-  filter {
-    name   = "tag:Name"
-    values = [local.vpc_name_to_discover]
+  tags = {
+    ou = local.vpc_ou
   }
 }
 

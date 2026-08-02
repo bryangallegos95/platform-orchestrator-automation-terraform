@@ -1,12 +1,12 @@
 # modules/database/aurora-postgresql/data.tf
 #
-# VPC + subnet + KMS discovery — finds the Spoke VPC by Name convention, the
+# VPC + subnet + KMS discovery — finds the Spoke VPC by OU tag, the
 # BDD-tier subnets by the Tier/AZ tag contract the VPC module stamps, and the
 # account's pre-existing CMKs by alias (RDS storage + CloudWatch Logs).
 # NO VPC/subnet/key IDs passed in; NO shared state.
 #
 # Discovery contract (modules/networking/vpc):
-#   VPC    : tag Name = vpc-aw-{region_short}-{vpc_service}-{ambiente}
+#   VPC    : tag ou = var.service (OU name, lowercase)
 #   Subnet : tag Tier = bdd  +  tag AZ = a|b  (within that VPC)
 #
 # KMS contract (account baseline — the module NEVER creates keys):
@@ -20,10 +20,10 @@ data "aws_caller_identity" "current" {}
 # (terraform_data.guards) to catch a provider/region mismatch.
 data "aws_region" "current" {}
 
-# The Spoke VPC that owns the BDD subnets (by Name convention).
+# The Spoke VPC discovered by OU tag (decoupled from VPC naming convention).
 data "aws_vpc" "spoke" {
   tags = {
-    Name = local.vpc_name_to_discover
+    ou = local.vpc_ou
   }
 }
 

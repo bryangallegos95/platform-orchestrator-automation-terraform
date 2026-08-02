@@ -24,7 +24,7 @@ variable "aws_region" {
 
 # ── Identity ──────────────────────────────────────────────────────────────────
 variable "service" {
-  description = "Short service/product name used for VPC discovery (DEPRECATED — use vpc_discovery_service instead). Kept for backward compatibility. If vpc_discovery_service is set, this variable is ignored for VPC lookup."
+  description = "OU name (lowercase) used for VPC discovery via tag 'ou'. Passed from orchestrator extra_vars. Example: contenerizacion, datosanalitica, plataforma."
   type        = string
 
   validation {
@@ -34,7 +34,7 @@ variable "service" {
 }
 
 variable "vpc_discovery_service" {
-  description = "Service name used to discover the Spoke VPC by Name tag (vpc-aw-{region}-{vpc_discovery_service}-{ambiente}). When empty (default), the module uses var.workload for VPC discovery. Set this when the VPC's service tag differs from the workload name."
+  description = "DEPRECATED — VPC discovery now uses tag 'ou' from var.service. This variable is ignored."
   type        = string
   default     = ""
 
