@@ -15,31 +15,37 @@
 #                   ceiling, extra readers, non-security parameters, tags...).
 #
 # Naming pattern reference:
-#   Cluster        : rds-aw-{region_short}-{service}-{workload}-{ambiente}
-#   Instance       : rds-aw-{region_short}-{service}-{workload}-{nn}-{ambiente}
-#   Subnet group   : sng-aw-{region_short}-{service}-{workload}-{ambiente}
-#   Cluster PG     : cpg-aw-{region_short}-{service}-{workload}-{ambiente}
-#   Instance PG    : dpg-aw-{region_short}-{service}-{workload}-{ambiente}
-#   SG             : sgp-aw-{region_short}-{service}-{workload}-{ambiente}
-#   Monitoring role: iam-role-aw-{region_short}-{service}-{workload}-rds-monitoring-{ambiente}
-#   Global cluster : gdb-aw-{service}-{workload}  (region-agnostic by design)
-#   VPC lookup     : vpc-aw-{region_short}-{service}-{ambiente}
+#   Cluster        : rds-aw-{region_short}-{workload}-{ambiente}
+#   Instance       : rds-aw-{region_short}-{workload}-{nn}-{ambiente}
+#   Subnet group   : sng-aw-{region_short}-{workload}-{ambiente}
+#   Cluster PG     : cpg-aw-{region_short}-{workload}-{ambiente}
+#   Instance PG    : dpg-aw-{region_short}-{workload}-{ambiente}
+#   SG             : sgp-aw-{region_short}-{workload}-{ambiente}
+#   Monitoring role: iam-role-aw-{region_short}-{workload}-rds-monitoring-{ambiente}
+#   Global cluster : gdb-aw-{workload}  (region-agnostic by design)
+#   VPC lookup     : vpc-aw-{region_short}-{vpc_service}-{ambiente}
 
 locals {
   # ── Region-derived values ────────────────────────────────────────────────
   region_short = var.aws_region == "us-east-2" ? "ue2" : "ue1"
 
+  # ── VPC discovery service ────────────────────────────────────────────────
+  # If vpc_discovery_service is set, use it to find the Spoke VPC; otherwise
+  # fall back to var.workload. This allows the module to deploy into a VPC
+  # whose service tag differs from the workload name.
+  vpc_service = var.vpc_discovery_service != "" ? var.vpc_discovery_service : var.workload
+
   # ── Discovery targets (contract with modules/networking/vpc) ─────────────
-  vpc_name_to_discover = "vpc-aw-${local.region_short}-${var.service}-${var.ambiente}"
+  vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.vpc_service}-${var.ambiente}"
 
   # ── Resource names ────────────────────────────────────────────────────────
-  cluster_name         = "rds-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  subnet_group_name    = "sng-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  cluster_pg_name      = "cpg-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  instance_pg_name     = "dpg-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  sg_name              = "sgp-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  monitoring_role_name = "iam-role-aw-${local.region_short}-${var.service}-${var.workload}-rds-monitoring-${var.ambiente}"
-  global_cluster_name  = "gdb-aw-${var.service}-${var.workload}"
+  cluster_name         = "rds-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  subnet_group_name    = "sng-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  cluster_pg_name      = "cpg-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  instance_pg_name     = "dpg-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  sg_name              = "sgp-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  monitoring_role_name = "iam-role-aw-${local.region_short}-${var.workload}-rds-monitoring-${var.ambiente}"
+  global_cluster_name  = "gdb-aw-${var.workload}"
 
   # 🔒 LOCKED — engine port. Security standard: 15432 (not the default 5432).
   # Applied to the cluster AND the Security Group ingress rules. Not exposed

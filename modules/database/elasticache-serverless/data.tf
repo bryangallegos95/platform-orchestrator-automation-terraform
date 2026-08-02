@@ -3,6 +3,7 @@
 # VPC, subnet, and KMS key discovery. Same contract as aurora-postgresql/data.tf.
 # No IDs are passed in — everything is discovered by the tag/naming contract
 # established by modules/networking/vpc.
+# VPC discovery uses local.vpc_service (resolved from vpc_discovery_service or workload).
 
 # ── Current identity ──────────────────────────────────────────────────────────
 data "aws_caller_identity" "current" {}

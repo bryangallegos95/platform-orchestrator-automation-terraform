@@ -11,8 +11,8 @@
 #                receive wait time, extra tags.
 #
 # Naming pattern:
-#   Queue      : sqs-aw-{region_short}-{service}-{workload}-{queue_key}-{ambiente}
-#   DLQ        : sqs-aw-{region_short}-{service}-{workload}-{queue_key}-dlq-{ambiente}
+#   Queue      : sqs-aw-{region_short}-{workload}-{queue_key}-{ambiente}
+#   DLQ        : sqs-aw-{region_short}-{workload}-{queue_key}-dlq-{ambiente}
 #   FIFO queues get .fifo suffix appended automatically.
 
 locals {
@@ -48,8 +48,8 @@ locals {
       dlq_max_receive_count       = max(local.dlq_max_receive_count_floor, v.dlq_max_receive_count)
       dlq_retention_seconds       = max(local.dlq_retention_floor, v.dlq_message_retention_days) * 86400
       # Names
-      queue_name = v.fifo ? "sqs-aw-${local.region_short}-${var.service}-${var.workload}-${k}-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.service}-${var.workload}-${k}-${var.ambiente}"
-      dlq_name   = v.fifo ? "sqs-aw-${local.region_short}-${var.service}-${var.workload}-${k}-dlq-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.service}-${var.workload}-${k}-dlq-${var.ambiente}"
+      queue_name = v.fifo ? "sqs-aw-${local.region_short}-${var.workload}-${k}-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.workload}-${k}-${var.ambiente}"
+      dlq_name   = v.fifo ? "sqs-aw-${local.region_short}-${var.workload}-${k}-dlq-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.workload}-${k}-dlq-${var.ambiente}"
     }
   }
 

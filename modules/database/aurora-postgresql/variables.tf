@@ -19,12 +19,23 @@ variable "aws_region" {
 
 # ── Identity ──────────────────────────────────────────────────────────────────
 variable "service" {
-  description = "Short service / product name used in resource naming AND VPC discovery. Must match the 'service' used by the Spoke VPC module (vpc-aw-{region}-{service}-{ambiente}). E.g. 'payments', 'devops', 'bff'"
+  description = "Short service / product name used for VPC discovery (DEPRECATED — use vpc_discovery_service instead). Kept for backward compatibility. If vpc_discovery_service is set, this variable is ignored for VPC lookup."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9-]+$", var.service))
     error_message = "service must be lowercase alphanumeric and hyphens only."
+  }
+}
+
+variable "vpc_discovery_service" {
+  description = "Service name used to discover the Spoke VPC by Name tag (vpc-aw-{region}-{vpc_discovery_service}-{ambiente}). When empty (default), the module uses var.workload for VPC discovery. Set this when the VPC's service tag differs from the workload name."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.vpc_discovery_service == "" || can(regex("^[a-z0-9-]+$", var.vpc_discovery_service))
+    error_message = "vpc_discovery_service must be empty or lowercase alphanumeric and hyphens only."
   }
 }
 
