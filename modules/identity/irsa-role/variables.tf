@@ -128,9 +128,9 @@ variable "roles" {
 
   validation {
     condition = alltrue([
-      for k, v in var.roles : length(v.service_accounts) > 0
+      for k, v in var.roles : length(v.service_accounts) == 1
     ])
-    error_message = "Every role must have at least one service_account."
+    error_message = "Each IRSA role must map to exactly one ServiceAccount (1:1 relationship). Create separate roles for separate service accounts."
   }
 
   validation {
