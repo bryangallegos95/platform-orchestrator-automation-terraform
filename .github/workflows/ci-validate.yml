@@ -153,11 +153,13 @@ jobs:
 
   # ─────────────────────────────────────────────
   #  ③ SAST (Checkmarx — conditional)
-  #  Runs on GitHub-hosted runner because Checkmarx action
-  #  requires marketplace access not available on self-hosted.
+  #  Runs on GitHub-hosted runner (needs Docker for Checkmarx container action).
+  #  For IaC-only repos: detects no app code → skips Checkmarx entirely.
+  #  The entire job is skipped if checkmarx_scan=false.
   # ─────────────────────────────────────────────
   sast:
     name: "③ SAST"
+    if: inputs.checkmarx_scan
     runs-on: ubuntu-latest
 
     outputs:

@@ -272,6 +272,7 @@ jobs:
 
       - name: Create or update Pull Request
         id: pr
+        if: steps.consolidate.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
@@ -440,4 +441,16 @@ jobs:
           | Components with changes | ${CHANGE_COUNT} |
           | Components list | ${COMPONENTS_WITH_CHANGES} |
           | Context version | v2 (multi-component) |
+          EOF
+
+
+      - name: No changes — skip PR
+        if: steps.consolidate.outputs.has_changes != 'true'
+        run: |
+          echo "::notice::No components have infrastructure changes. PR creation skipped."
+          echo "pr_number=" >> $GITHUB_OUTPUT
+          echo "pr_url=" >> $GITHUB_OUTPUT
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### No Changes Detected
+          All components returned \`plan_exitcode=0\`. No PR created.
           EOF
