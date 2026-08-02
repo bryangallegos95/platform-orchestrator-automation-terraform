@@ -484,10 +484,10 @@ jobs:
           retention-days: 14
 
   # ─────────────────────────────────────────────
-  #  ③ SECURITY (Prowler IaC)
+  #  ③ PROWLER IaC SCAN
   # ─────────────────────────────────────────────
   security:
-    name: "③ Security [${{ inputs.component }}]"
+    name: "③ Prowler IaC Scan [${{ inputs.component }}]"
     needs: [resolve, plan]
     if: inputs.security_scan
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
