@@ -250,6 +250,14 @@ jobs:
           IS_MULTI="${{ inputs.is_multi_component }}"
           PLAN_DIR="$(pwd)/plans"
 
+          # Auto-detect multi-component if not explicitly set
+          if [ "$IS_MULTI" != "true" ]; then
+            if find . -mindepth 2 -name "terragrunt.hcl" 2>/dev/null | grep -q .; then
+              IS_MULTI="true"
+              echo "::notice::Auto-detected multi-component directory (overriding is_multi_component=false)"
+            fi
+          fi
+
           echo "Applying saved plan: ${{ inputs.plan_artifact_name }}"
           SECONDS=0
           set +e
