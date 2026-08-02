@@ -31,7 +31,6 @@ resource "aws_sqs_queue" "dlq" {
   fifo_queue = each.value.fifo
 
   # LOCKED — CMK encryption (same key as main queue)
-  sqs_managed_sse_enabled           = false
   kms_master_key_id                 = local.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
 
@@ -58,7 +57,6 @@ resource "aws_sqs_queue" "main" {
   fifo_queue = each.value.fifo
 
   # LOCKED — CMK encryption
-  sqs_managed_sse_enabled           = false
   kms_master_key_id                 = local.kms_key_arn
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
 
