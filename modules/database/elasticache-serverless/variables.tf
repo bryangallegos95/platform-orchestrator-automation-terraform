@@ -114,7 +114,7 @@ variable "max_ecpu_per_second" {
   default     = null
 
   validation {
-    condition     = var.max_ecpu_per_second == null || var.max_ecpu_per_second >= 1000
+    condition     = var.max_ecpu_per_second == null ? true : var.max_ecpu_per_second >= 1000
     error_message = "max_ecpu_per_second must be null or >= 1000."
   }
 }
@@ -125,7 +125,7 @@ variable "max_data_storage_gb" {
   default     = null
 
   validation {
-    condition     = var.max_data_storage_gb == null || var.max_data_storage_gb >= 1
+    condition     = var.max_data_storage_gb == null ? true : var.max_data_storage_gb >= 1
     error_message = "max_data_storage_gb must be null or >= 1."
   }
 }
@@ -137,7 +137,7 @@ variable "snapshot_retention_days" {
   default     = null
 
   validation {
-    condition     = var.snapshot_retention_days == null || (var.snapshot_retention_days >= 0 && var.snapshot_retention_days <= 35)
+    condition     = var.snapshot_retention_days == null ? true : (var.snapshot_retention_days >= 0 && var.snapshot_retention_days <= 35)
     error_message = "snapshot_retention_days must be null or between 0 and 35."
   }
 }
@@ -148,7 +148,7 @@ variable "daily_snapshot_time" {
   default     = null
 
   validation {
-    condition     = var.daily_snapshot_time == null || can(regex("^[0-2][0-9]:[0-5][0-9]$", var.daily_snapshot_time))
+    condition     = var.daily_snapshot_time == null ? true : can(regex("^[0-2][0-9]:[0-5][0-9]$", var.daily_snapshot_time))
     error_message = "daily_snapshot_time must be null or HH:MM format."
   }
 }
