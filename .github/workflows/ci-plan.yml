@@ -490,7 +490,7 @@ jobs:
     name: "③ Prowler IaC Scan [${{ inputs.component }}]"
     needs: [resolve, plan]
     if: inputs.security_scan
-    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+    runs-on: ubuntu-latest
 
     outputs:
       total_findings:   ${{ steps.parse.outputs.total_findings }}
