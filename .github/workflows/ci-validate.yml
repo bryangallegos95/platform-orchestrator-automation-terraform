@@ -153,10 +153,12 @@ jobs:
 
   # ─────────────────────────────────────────────
   #  ③ SAST (Checkmarx — conditional)
+  #  Runs on GitHub-hosted runner because Checkmarx action
+  #  requires marketplace access not available on self-hosted.
   # ─────────────────────────────────────────────
   sast:
     name: "③ SAST"
-    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+    runs-on: ubuntu-latest
 
     outputs:
       sast_executed: ${{ steps.scan_result.outputs.sast_executed }}
