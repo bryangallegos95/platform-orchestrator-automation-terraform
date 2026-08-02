@@ -20,12 +20,23 @@ variable "aws_region" {
 
 # ── Identity ──────────────────────────────────────────────────────────────────
 variable "service" {
-  description = "Short service/product name used in resource naming. Must match the naming contract (e.g. 'negocio', 'payments')."
+  description = "Short service/product name (DEPRECATED — no longer used in resource naming). Kept for backward compatibility with existing son-repo invocations."
   type        = string
 
   validation {
     condition     = can(regex("^[a-z0-9-]+$", var.service))
     error_message = "service must be lowercase alphanumeric and hyphens only."
+  }
+}
+
+variable "vpc_discovery_service" {
+  description = "Service name used to discover the Spoke VPC by Name tag. SQS does not perform VPC discovery itself, but this variable is provided for interface consistency with other platform modules (aurora-postgresql, elasticache-serverless)."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.vpc_discovery_service == "" || can(regex("^[a-z0-9-]+$", var.vpc_discovery_service))
+    error_message = "vpc_discovery_service must be empty or lowercase alphanumeric and hyphens only."
   }
 }
 

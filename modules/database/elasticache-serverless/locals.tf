@@ -13,9 +13,9 @@
 #                daily snapshot time, user group, extra tags.
 #
 # Naming pattern:
-#   Cache       : ec-aw-{region_short}-{service}-{workload}-{ambiente}
-#   Subnet group: ecsng-aw-{region_short}-{service}-{workload}-{ambiente}
-#   SG          : sgp-aw-{region_short}-{service}-{workload}-ec-{ambiente}
+#   Cache       : ec-aw-{region_short}-{workload}-{ambiente}
+#   Subnet group: ecsng-aw-{region_short}-{workload}-{ambiente}
+#   SG          : sgp-aw-{region_short}-{workload}-ec-{ambiente}
 
 locals {
   # ── Region-derived values ────────────────────────────────────────────────
@@ -24,13 +24,19 @@ locals {
   # ── Environment posture ───────────────────────────────────────────────────
   is_prod_like = contains(["preprod", "prod", "dr"], var.ambiente)
 
+  # ── VPC discovery service ────────────────────────────────────────────────
+  # If vpc_discovery_service is set, use it to find the Spoke VPC; otherwise
+  # fall back to var.workload. This allows the module to deploy into a VPC
+  # whose service tag differs from the workload name.
+  vpc_service = var.vpc_discovery_service != "" ? var.vpc_discovery_service : var.workload
+
   # ── Resource names ────────────────────────────────────────────────────────
-  cache_name        = "ec-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  subnet_group_name = "ecsng-aw-${local.region_short}-${var.service}-${var.workload}-${var.ambiente}"
-  sg_name           = "sgp-aw-${local.region_short}-${var.service}-${var.workload}-ec-${var.ambiente}"
+  cache_name        = "ec-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  subnet_group_name = "ecsng-aw-${local.region_short}-${var.workload}-${var.ambiente}"
+  sg_name           = "sgp-aw-${local.region_short}-${var.workload}-ec-${var.ambiente}"
 
   # ── Discovery targets (contract with modules/networking/vpc) ─────────────
-  vpc_name_to_discover = "vpc-aw-${local.region_short}-${var.service}-${var.ambiente}"
+  vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.vpc_service}-${var.ambiente}"
 
   # ── KMS resolution ────────────────────────────────────────────────────────
   kms_key_arn = var.kms_key_arn != "" ? var.kms_key_arn : data.aws_kms_alias.elasticache[0].target_key_arn

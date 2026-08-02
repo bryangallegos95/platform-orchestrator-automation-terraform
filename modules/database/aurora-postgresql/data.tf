@@ -6,7 +6,7 @@
 # NO VPC/subnet/key IDs passed in; NO shared state.
 #
 # Discovery contract (modules/networking/vpc):
-#   VPC    : tag Name = vpc-aw-{region_short}-{service}-{ambiente}
+#   VPC    : tag Name = vpc-aw-{region_short}-{vpc_service}-{ambiente}
 #   Subnet : tag Tier = bdd  +  tag AZ = a|b  (within that VPC)
 #
 # KMS contract (account baseline — the module NEVER creates keys):
