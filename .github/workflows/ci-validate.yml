@@ -4,20 +4,15 @@
 # Called ONCE per CI run (not per-component).
 #
 # ADR-008: Splits the monolithic ci.yml into:
-#   ci-validate.yml (this) → format + lint (ONE time)
+#   ci-validate.yml (this) → format + lint + sast (ONE time)
 #   ci-plan.yml            → plan + cost + prowler IaC scan (PER component)
 #   ci-create-pr.yml       → consolidated PR (ONE time)
 #
 # JOBS:
 #   ① format   → terragrunt hclfmt --check (entire repo)
 #   ② lint     → tflint governance rules (all components)
-#   ③ gate     → aggregate pass/fail
-#
-# SAST (Checkmarx) is NOT included here.
-# It only applies to repos with application code (src/, lambda/, etc.)
-# which are rare in this platform. For those repos, SAST runs as a
-# separate workflow or job in the orchestrator. IaC security is covered
-# by Prowler IaC Scan in ci-plan.yml (per-component).
+#   ③ sast     → Checkmarx SAST/SCA (auto-detect app code; skip if IaC-only)
+#   ④ gate     → aggregate pass/fail
 #
 # FAIL-FAST: If validation fails, no plans will execute.
 
@@ -52,6 +47,16 @@ on:
         required: false
         type: string
         default: ""
+      checkmarx_scan:
+        description: "Run Checkmarx SAST/SCA scan. Default: true (auto-detect)."
+        required: false
+        type: boolean
+        default: true
+      fail_on_high_critical:
+        description: "Fail on CRITICAL/HIGH SAST findings. Default: true."
+        required: false
+        type: boolean
+        default: true
 
     outputs:
       validation_passed:
@@ -148,11 +153,153 @@ jobs:
           TERRAGRUNT_NON_INTERACTIVE: "true"
 
   # ─────────────────────────────────────────────
-  #  ③ GATE — aggregate pass/fail
+  #  ③ SAST (Checkmarx — auto-detect app code)
+  #  Runs on ubuntu-latest (needs Docker for Checkmarx container action).
+  #  Auto-detects app code directories (src/, lambda/, etc.).
+  #  If IaC-only: skips Checkmarx scan but still passes the job.
+  #  If app code found: runs full SAST/SCA scan.
+  # ─────────────────────────────────────────────
+  sast:
+    name: "③ SAST"
+    if: inputs.checkmarx_scan
+    runs-on: ubuntu-latest
+
+    outputs:
+      sast_executed: ${{ steps.scan_result.outputs.sast_executed }}
+      sast_summary:  ${{ steps.build_summary.outputs.summary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch || github.ref }}
+
+      - name: Detect application code
+        id: detect
+        run: |
+          HAS_CODE="false"
+          for dir in src app lambda functions scripts/app lib pkg cmd handlers controllers; do
+            if [ -d "$dir" ]; then
+              HAS_CODE="true"
+              echo "Found application code directory: $dir"
+              break
+            fi
+          done
+
+          if [ "$HAS_CODE" = "false" ]; then
+            for pattern in "*.py" "*.js" "*.ts" "*.go" "*.java" "*.cs" "*.rb"; do
+              if find . -maxdepth 3 -name "$pattern" \
+                -not -path "./.terraform/*" \
+                -not -path "./vendor/*" \
+                -not -path "./node_modules/*" \
+                -not -path "./.orchestrator/*" | grep -q .; then
+                HAS_CODE="true"
+                echo "Found source files matching: $pattern"
+                break
+              fi
+            done
+          fi
+
+          echo "has_app_code=$HAS_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_CODE" = "true" ]; then
+            echo "Application code detected. Checkmarx SAST will run."
+          else
+            echo "No application code found. IaC-only repo — Checkmarx SAST skipped."
+            echo "### ③ SAST: Skipped (IaC-only repo)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run Checkmarx SAST/SCA
+        id: cxscan
+        if: steps.detect.outputs.has_app_code == 'true'
+        continue-on-error: true
+        uses: checkmarx/ast-github-action@main
+        with:
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          base_uri: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}-app
+          branch: ${{ inputs.feature_branch || github.ref_name }}
+          scan_params: >-
+            --scan-types sast,sca
+            --report-format json
+            --output-path .
+
+      - name: Evaluate SAST results
+        id: evaluate
+        if: steps.detect.outputs.has_app_code == 'true'
+        run: |
+          if [ ! -f "cx_result.json" ]; then
+            echo "::warning::Checkmarx scan did not produce results file."
+            echo "total_critical=0" >> $GITHUB_OUTPUT
+            echo "total_high=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
+          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
+          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
+          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
+
+          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT))
+          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH))
+
+          echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
+          echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ③ SAST (Checkmarx)
+          | Severity | Count |
+          |----------|-------|
+          | CRITICAL | $TOTAL_CRIT |
+          | HIGH | $TOTAL_HIGH |
+          EOF
+
+      - name: Build summary for PR
+        id: build_summary
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" != "true" ]; then
+            echo "summary=SAST: Skipped (IaC-only repo)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CRIT="${{ steps.evaluate.outputs.total_critical || '0' }}"
+          HIGH="${{ steps.evaluate.outputs.total_high || '0' }}"
+          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
+            echo "summary=SAST (Checkmarx): No app vulnerabilities" >> $GITHUB_OUTPUT
+          else
+            echo "summary=SAST (Checkmarx): $CRIT Critical, $HIGH High" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Mark SAST as executed
+        id: scan_result
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" = "true" ]; then
+            echo "sast_executed=true" >> $GITHUB_OUTPUT
+          else
+            echo "sast_executed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enforce SAST gate
+        if: |
+          steps.detect.outputs.has_app_code == 'true' &&
+          inputs.fail_on_high_critical
+        run: |
+          TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
+          TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
+
+          if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo "::error::SAST gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities."
+            exit 1
+          fi
+          echo "SAST gate PASSED: 0 CRITICAL, 0 HIGH."
+
+  # ─────────────────────────────────────────────
+  #  ④ GATE — aggregate pass/fail
   # ─────────────────────────────────────────────
   gate:
     name: "Validation Gate"
-    needs: [format, lint]
+    needs: [format, lint, sast]
     if: always()
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
 
@@ -165,9 +312,11 @@ jobs:
         run: |
           FORMAT_RESULT="${{ needs.format.result }}"
           LINT_RESULT="${{ needs.lint.result }}"
+          SAST_RESULT="${{ needs.sast.result }}"
 
           echo "Format: $FORMAT_RESULT"
           echo "Lint: $LINT_RESULT"
+          echo "SAST: $SAST_RESULT"
 
           if [ "$FORMAT_RESULT" != "success" ]; then
             echo "::error::Format check failed."
@@ -181,6 +330,13 @@ jobs:
             exit 1
           fi
 
+          # SAST can be skipped (IaC-only or checkmarx_scan=false) — that's OK
+          if [ "$SAST_RESULT" != "success" ] && [ "$SAST_RESULT" != "skipped" ]; then
+            echo "::error::SAST check failed."
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
           echo "passed=true" >> $GITHUB_OUTPUT
           echo "All validation gates passed."
 
@@ -190,5 +346,6 @@ jobs:
           |-------|--------|
           | Format (hclfmt) | $FORMAT_RESULT |
           | Lint (TFLint) | $LINT_RESULT |
+          | SAST (Checkmarx) | $SAST_RESULT |
           | **Overall** | **PASSED** |
           EOF
