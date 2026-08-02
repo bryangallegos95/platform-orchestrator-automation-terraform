@@ -593,7 +593,7 @@ jobs:
           path: |
             ${{ inputs.working_directory }}/tfplan
             ${{ inputs.working_directory }}/plan_output.txt
-          retention-days: 5
+          retention-days: 14
           if-no-files-found: error
 
   # ─────────────────────────────────────────────
@@ -681,7 +681,7 @@ jobs:
         with:
           name: infracost-${{ inputs.environment }}-${{ github.sha }}
           path: ${{ inputs.working_directory }}/infracost.json
-          retention-days: 5
+          retention-days: 14
 
   # ─────────────────────────────────────────────
   #  ⑤ SECURITY — Prowler IaC (Static Analysis)

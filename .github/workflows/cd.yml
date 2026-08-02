@@ -11,7 +11,7 @@
 #   - plan_exitcode=0 → apply skipped entirely.
 #   - Apply failure → auto-destroy (dev/qa) or alert-only (preprod/prod/dr).
 #   - One apply per environment at a time (concurrency queue, never cancel).
-#   - On success → creates promotion Issue with /approve /reject commands.
+#   - On success → creates promotion Issue with approval labels.
 #   - Post-apply → triggers Prowler App scan (when available).
 #   - Promotion Issue includes CloudCheckr FinOps deeplink.
 #
@@ -463,7 +463,9 @@ jobs:
   # ─────────────────────────────────────────────
   #  ② PROMOTION ISSUE
   #  Creates a GitHub Issue for team validation.
-  #  Contains /approve and /reject commands.
+  #  Promotion is triggered by LABELS:
+  #    - `approved-for-{next_env}` → promote
+  #    - `rejected-{next_env}` → stop promotion
   #  Embeds PROMOTION_METADATA as hidden HTML comment
   #  for the promotion-listener workflow to parse.
   # ─────────────────────────────────────────────
@@ -556,10 +558,10 @@ jobs:
           > **Assigned teams**: ${ASSIGNEE_MENTIONS}
           > **Next environment**: \`${NEXT_ENV}\`
 
-          | Command | Effect |
-          |---------|--------|
-          | \`/approve\` | ✅ Close issue + promote to \`${NEXT_ENV}\` |
-          | \`/reject reason: <description>\` | ❌ Close issue + stop promotion |
+          | Action | How |
+          |--------|-----|
+          | ✅ Approve promotion | Add label \`approved-for-${NEXT_ENV}\` |
+          | ❌ Reject promotion | Add label \`rejected-${NEXT_ENV}\` and comment with reason |
 
           ⚠️ **Only members of the assigned teams can approve or reject.**
 
@@ -590,6 +592,7 @@ jobs:
             --body "$ISSUE_BODY" \
             --label "$PROMOTION_LABEL" \
             --label "awaiting-validation" \
+            --label "pending-${NEXT_ENV}-approval" \
             --label "environment/${ENV}")
 
           ISSUE_NUMBER=$(gh issue view "$ISSUE_URL" --json number --jq '.number')
@@ -609,5 +612,6 @@ jobs:
           | From | \`${{ inputs.environment }}\` |
           | To | \`${{ inputs.next_environment }}\` |
           | Approval teams | \`${{ inputs.approval_teams }}\` |
-          | Command | \`/approve\` or \`/reject reason: ...\` |
+          | Approve | Add label \`approved-for-${{ inputs.next_environment }}\` |
+          | Reject | Add label \`rejected-${{ inputs.next_environment }}\` |
           EOF
