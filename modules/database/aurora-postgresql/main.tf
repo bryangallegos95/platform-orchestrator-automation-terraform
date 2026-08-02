@@ -53,6 +53,7 @@ resource "aws_db_subnet_group" "this" {
 resource "aws_rds_cluster" "this" {
   cluster_identifier = local.cluster_name
   engine             = "aurora-postgresql"
+  engine_mode        = "provisioned"
   engine_version     = var.engine_version
   port               = local.db_port # 🔒 LOCKED — 15432 (platform security standard)
 
