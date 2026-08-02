@@ -11,8 +11,8 @@
 #                receive wait time, extra tags.
 #
 # Naming pattern:
-#   Queue      : sqs-aw-{region_short}-{workload}-{queue_key}-{ambiente}
-#   DLQ        : sqs-aw-{region_short}-{workload}-{queue_key}-dlq-{ambiente}
+#   Queue      : sqs-aw-{region_short}-{workload}-{funcionalidad}-{queue_key}-{ambiente}
+#   DLQ        : sqs-aw-{region_short}-{workload}-{funcionalidad}-{queue_key}-dlq-{ambiente}
 #   FIFO queues get .fifo suffix appended automatically.
 
 locals {
@@ -24,6 +24,11 @@ locals {
 
   # ── KMS resolution ────────────────────────────────────────────────────────
   kms_key_arn = var.kms_key_arn != "" ? var.kms_key_arn : data.aws_kms_alias.sqs[0].target_key_arn
+
+  # ── Composed naming suffix ───────────────────────────────────────────────
+  # Combines workload + funcionalidad for the full resource name segment.
+  # Pattern: {tipo}-aw-{region}-{workload}-{funcionalidad}-{queue_key}-{ambiente}
+  resource_suffix = "${var.workload}-${var.funcionalidad}"
 
   # ── GUARD-RAIL floors ─────────────────────────────────────────────────────
   # Message retention: floor 4 days (son repo may raise to 14, never below 4)
@@ -48,8 +53,8 @@ locals {
       dlq_max_receive_count       = max(local.dlq_max_receive_count_floor, v.dlq_max_receive_count)
       dlq_retention_seconds       = max(local.dlq_retention_floor, v.dlq_message_retention_days) * 86400
       # Names
-      queue_name = v.fifo ? "sqs-aw-${local.region_short}-${var.workload}-${k}-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.workload}-${k}-${var.ambiente}"
-      dlq_name   = v.fifo ? "sqs-aw-${local.region_short}-${var.workload}-${k}-dlq-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${var.workload}-${k}-dlq-${var.ambiente}"
+      queue_name = v.fifo ? "sqs-aw-${local.region_short}-${local.resource_suffix}-${k}-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${local.resource_suffix}-${k}-${var.ambiente}"
+      dlq_name   = v.fifo ? "sqs-aw-${local.region_short}-${local.resource_suffix}-${k}-dlq-${var.ambiente}.fifo" : "sqs-aw-${local.region_short}-${local.resource_suffix}-${k}-dlq-${var.ambiente}"
     }
   }
 

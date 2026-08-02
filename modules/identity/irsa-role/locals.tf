@@ -13,7 +13,7 @@
 #                policies (son-repo defines what each role can do).
 #
 # Naming pattern:
-#   Role: irsa-aw-{region_short}-{service}-{workload}-{role_key}-{ambiente}
+#   Role: irsa-aw-{region_short}-{service}-{workload}-{funcionalidad}-{role_key}-{ambiente}
 
 locals {
   # ── Region-derived values ────────────────────────────────────────────────
@@ -33,13 +33,18 @@ locals {
   # ── 🔒 LOCKED — Max session duration ceiling ─────────────────────────────
   max_session_ceiling = 3600
 
+  # ── Composed naming suffix ───────────────────────────────────────────────
+  # Combines workload + funcionalidad for the full resource name segment.
+  # Pattern: irsa-aw-{region}-{service}-{workload}-{funcionalidad}-{role_key}-{ambiente}
+  resource_suffix = "${var.workload}-${var.funcionalidad}"
+
   # ── Role configurations with naming ──────────────────────────────────────
   roles = {
     for k, v in var.roles : k => {
-      role_name = "irsa-aw-${local.region_short}-${var.service}-${var.workload}-${k}-${var.ambiente}"
+      role_name = "irsa-aw-${local.region_short}-${var.service}-${local.resource_suffix}-${k}-${var.ambiente}"
       description = coalesce(
         v.description,
-        "IRSA role for ${k} in ${var.service}/${var.workload} (${var.ambiente})"
+        "IRSA role for ${k} in ${var.service}/${local.resource_suffix} (${var.ambiente})"
       )
       service_accounts        = v.service_accounts
       inline_policies         = v.inline_policies
