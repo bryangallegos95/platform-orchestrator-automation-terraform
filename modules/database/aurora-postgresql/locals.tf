@@ -23,20 +23,15 @@
 #   SG             : sgp-aw-{region_short}-{workload}-{funcionalidad}-{ambiente}
 #   Monitoring role: iam-role-aw-{region_short}-{workload}-{funcionalidad}-rds-monitoring-{ambiente}
 #   Global cluster : gdb-aw-{workload}-{funcionalidad}  (region-agnostic by design)
-#   VPC lookup     : vpc-aw-{region_short}-{vpc_service}-{ambiente}
+#   VPC lookup     : tag ou = var.service (OU name, lowercase)
 
 locals {
   # ── Region-derived values ────────────────────────────────────────────────
   region_short = var.aws_region == "us-east-2" ? "ue2" : "ue1"
 
-  # ── VPC discovery service ────────────────────────────────────────────────
-  # If vpc_discovery_service is set, use it to find the Spoke VPC; otherwise
-  # fall back to var.workload. This allows the module to deploy into a VPC
-  # whose service tag differs from the workload name.
-  vpc_service = var.vpc_discovery_service != "" ? var.vpc_discovery_service : var.workload
-
-  # ── Discovery targets (contract with modules/networking/vpc) ─────────────
-  vpc_name_to_discover = "vpc-aw-${local.region_short}-${local.vpc_service}-${var.ambiente}"
+  # ── VPC discovery: by OU tag (decoupled from VPC naming convention) ────
+  # var.service carries the OU name (lowercase) from orchestrator extra_vars
+  vpc_ou = var.service
 
   # ── Composed naming suffix ───────────────────────────────────────────────
   # Combines workload + funcionalidad for the full resource name segment.

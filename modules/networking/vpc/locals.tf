@@ -65,6 +65,7 @@ locals {
     CentroCosto        = var.centro_costo
     Ambiente           = var.ambiente
     ManagedBy          = "terraform"
+    ou                 = var.service
   }
 
   # Final merged tag map — used everywhere
