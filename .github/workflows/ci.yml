@@ -1,3 +1,19 @@
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  DEPRECATED — v2.3.x (legacy monolithic CI)                                │
+# │                                                                             │
+# │  This workflow is DEPRECATED as of v2.4.0 (ADR-008).                        │
+# │  New repos should use the split workflows:                                  │
+# │    - ci-validate.yml  → format + lint + sast (ONE time)                     │
+# │    - ci-plan.yml      → plan + cost + security (PER component)              │
+# │    - ci-create-pr.yml → consolidated PR (ONE time)                          │
+# │                                                                             │
+# │  This file is kept for backward compatibility with existing repos           │
+# │  that have not yet migrated to the new orchestrator pattern.                │
+# │                                                                             │
+# │  DO NOT add new features to this file.                                      │
+# │  Migration guide: platform-knowledge-base/strategy/decisions/008-*          │
+# └─────────────────────────────────────────────────────────────────────────────┘
+#
 # ORG-DEVOPS/.github/workflows/ci.yml
 #
 # Reusable CI workflow — called by product (son) repos.

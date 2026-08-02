@@ -1,0 +1,443 @@
+# ORG-DEVOPS/.github/workflows/ci-create-pr.yml
+#
+# Reusable PR CREATION workflow — consolidates all component plans into ONE PR.
+#
+# ADR-008: Splits the monolithic ci.yml into:
+#   ci-validate.yml    → format + lint + sast (ONE time)
+#   ci-plan.yml        → plan + cost + security (PER component)
+#   ci-create-pr.yml (this) → consolidated PR (ONE time)
+#
+# BEHAVIOR:
+#   - Downloads all "plan-result-{component}" artifacts from the current run
+#   - Builds a summary table: | Component | Changes | Cost | Security | Status |
+#   - Constructs DEPLOYMENT_CONTEXT with multi-component metadata
+#   - Creates or updates a single PR (idempotent)
+#
+# DEPLOYMENT_CONTEXT (new multi-component format):
+#   Embedded as HTML comment in PR body. Contains:
+#   - components_with_changes: JSON array of components with exitcode=2
+#   - plan_artifacts: JSON map { component: artifact_name }
+#   - All metadata needed by cd-on-merge.yml
+
+name: "[reusable] CI — Create PR"
+
+on:
+  workflow_call:
+    inputs:
+      # ─── Required inputs ───────────────────────────────────────
+      environment:
+        description: "Target environment (e.g. dev, qa, preprod, prod)"
+        required: true
+        type: string
+      service_name:
+        description: "Repository/service name (e.g. iac-tfn-e2evalidation-backingservices)"
+        required: true
+        type: string
+      feature_branch:
+        description: "Source branch for the PR"
+        required: true
+        type: string
+      target_branch:
+        description: "Target branch for the PR (e.g. dev, testing, preprod, master)"
+        required: true
+        type: string
+      components:
+        description: "JSON array of ALL components (e.g. '[\"aurora\",\"sqs\",\"redis\",\"irsa\"]')"
+        required: true
+        type: string
+      ou_name:
+        description: "OU / product name"
+        required: true
+        type: string
+      account_id:
+        description: "AWS account ID for the target environment"
+        required: true
+        type: string
+
+      # ─── Optional inputs ───────────────────────────────────────
+      runner_label:
+        description: "Override the runner tag. Default: uses environment value."
+        required: false
+        type: string
+        default: ""
+      extra_vars:
+        description: "Space-separated Terraform -var overrides (passthrough for CD)."
+        required: false
+        type: string
+        default: ""
+      workload:
+        description: "Business product name."
+        required: false
+        type: string
+        default: ""
+      funcionalidad:
+        description: "Repo purpose within the workload."
+        required: false
+        type: string
+        default: ""
+
+      # ─── Promotion chain context ──────────────────────────────
+      dev_account_id:
+        description: "DEV account ID."
+        required: false
+        type: string
+        default: ""
+      qa_account_id:
+        description: "QA account ID."
+        required: false
+        type: string
+        default: ""
+      preprod_account_id:
+        description: "PREPROD account ID (empty = skip preprod)."
+        required: false
+        type: string
+        default: ""
+      prod_account_id:
+        description: "PROD account ID."
+        required: false
+        type: string
+        default: ""
+      dr_enabled:
+        description: "Whether DR is enabled."
+        required: false
+        type: boolean
+        default: false
+
+    outputs:
+      pr_number:
+        description: "Created/updated PR number."
+        value: ${{ jobs.create-pr.outputs.pr_number }}
+      pr_url:
+        description: "Created/updated PR URL."
+        value: ${{ jobs.create-pr.outputs.pr_url }}
+
+jobs:
+  create-pr:
+    name: "Create Consolidated PR"
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+
+    outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      pr_url:    ${{ steps.pr.outputs.pr_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch }}
+          fetch-depth: 0
+
+      - name: Download all plan-result artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plan-result-*
+          path: /tmp/plan-results
+          merge-multiple: false
+
+      - name: Download all plan output artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: tfplan-*
+          path: /tmp/plan-artifacts
+          merge-multiple: false
+
+      - name: Consolidate plan results
+        id: consolidate
+        run: |
+          echo "── Consolidating plan results ──"
+
+          COMPONENTS='${{ inputs.components }}'
+          ENV="${{ inputs.environment }}"
+
+          # Initialize arrays
+          COMPONENTS_WITH_CHANGES="[]"
+          PLAN_ARTIFACTS="{}"
+          TABLE_ROWS=""
+          TOTAL_COST="0"
+          TOTAL_DIFF="0"
+          HAS_CHANGES="false"
+
+          # Process each component's plan-result artifact
+          for component in $(echo "$COMPONENTS" | jq -r '.[]'); do
+            RESULT_FILE="/tmp/plan-results/plan-result-${component}/result.json"
+
+            if [ ! -f "$RESULT_FILE" ]; then
+              echo "::warning::Plan result not found for component '${component}'. Skipping."
+              TABLE_ROWS="${TABLE_ROWS}| ${component} | Skipped | N/A | N/A | skipped |\n"
+              continue
+            fi
+
+            # Parse result JSON
+            EXITCODE=$(jq -r '.exitcode' "$RESULT_FILE")
+            STATUS=$(jq -r '.status' "$RESULT_FILE")
+            ARTIFACT_NAME=$(jq -r '.artifact_name' "$RESULT_FILE")
+            MONTHLY_COST=$(jq -r '.monthly_cost' "$RESULT_FILE")
+            COST_DIFF_VAL=$(jq -r '.cost_diff' "$RESULT_FILE")
+            SEC_FINDINGS=$(jq -r '.security_findings' "$RESULT_FILE")
+            WORKING_DIR=$(jq -r '.working_directory' "$RESULT_FILE")
+
+            # Build table row
+            if [ "$EXITCODE" = "0" ]; then
+              CHANGE_ICON="No changes"
+            elif [ "$EXITCODE" = "2" ]; then
+              CHANGE_ICON="Changes detected"
+              HAS_CHANGES="true"
+            else
+              CHANGE_ICON="Error"
+            fi
+
+            if [ "$SEC_FINDINGS" = "0" ]; then
+              SEC_DISPLAY="0"
+            else
+              SEC_DISPLAY="${SEC_FINDINGS}"
+            fi
+
+            TABLE_ROWS="${TABLE_ROWS}| ${component} | ${CHANGE_ICON} | \$${MONTHLY_COST}/mo | ${SEC_DISPLAY} | ${STATUS} |\n"
+
+            # Track components with actual changes
+            if [ "$EXITCODE" = "2" ]; then
+              COMPONENTS_WITH_CHANGES=$(echo "$COMPONENTS_WITH_CHANGES" | jq --arg c "$component" '. + [$c]')
+              PLAN_ARTIFACTS=$(echo "$PLAN_ARTIFACTS" | jq --arg c "$component" --arg a "$ARTIFACT_NAME" '. + {($c): $a}')
+            fi
+
+            # Sum costs
+            if [ "$MONTHLY_COST" != "N/A" ] && [ "$MONTHLY_COST" != "null" ]; then
+              TOTAL_COST=$(echo "$TOTAL_COST + $MONTHLY_COST" | bc 2>/dev/null || echo "$TOTAL_COST")
+            fi
+            if [ "$COST_DIFF_VAL" != "N/A" ] && [ "$COST_DIFF_VAL" != "null" ]; then
+              TOTAL_DIFF=$(echo "$TOTAL_DIFF + $COST_DIFF_VAL" | bc 2>/dev/null || echo "$TOTAL_DIFF")
+            fi
+
+            echo "Processed: ${component} → exitcode=${EXITCODE}, artifact=${ARTIFACT_NAME}"
+          done
+
+          # Count components with changes
+          CHANGE_COUNT=$(echo "$COMPONENTS_WITH_CHANGES" | jq 'length')
+
+          echo "components_with_changes=${COMPONENTS_WITH_CHANGES}" >> $GITHUB_OUTPUT
+          echo "plan_artifacts=${PLAN_ARTIFACTS}" >> $GITHUB_OUTPUT
+          echo "has_changes=${HAS_CHANGES}" >> $GITHUB_OUTPUT
+          echo "change_count=${CHANGE_COUNT}" >> $GITHUB_OUTPUT
+          echo "total_cost=${TOTAL_COST}" >> $GITHUB_OUTPUT
+          echo "total_diff=${TOTAL_DIFF}" >> $GITHUB_OUTPUT
+
+          # Write table rows to file (multiline output)
+          printf "${TABLE_ROWS}" > /tmp/table_rows.txt
+
+          echo "── Consolidation complete: ${CHANGE_COUNT} components with changes ──"
+
+      - name: Build plan details sections
+        id: details
+        run: |
+          COMPONENTS='${{ inputs.components }}'
+          DETAILS=""
+
+          for component in $(echo "$COMPONENTS" | jq -r '.[]'); do
+            # Look for plan_output.txt in the artifact directory
+            PLAN_FILE=""
+            # Artifacts are downloaded under their artifact name
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            ARTIFACT_DIR="/tmp/plan-artifacts/tfplan-${{ inputs.environment }}-${component}-${SHORT_SHA}"
+
+            if [ -d "$ARTIFACT_DIR" ]; then
+              # plan_output.txt is inside the working_directory subpath within the artifact
+              PLAN_FILE=$(find "$ARTIFACT_DIR" -name "plan_output.txt" -type f | head -1)
+            fi
+
+            if [ -n "$PLAN_FILE" ] && [ -f "$PLAN_FILE" ]; then
+              PLAN_CONTENT=$(cat "$PLAN_FILE")
+              # Truncate if too large
+              if [ ${#PLAN_CONTENT} -gt 30000 ]; then
+                PLAN_CONTENT="${PLAN_CONTENT:0:30000}
+
+          ... (truncated — see Actions log for full output)"
+              fi
+            else
+              PLAN_CONTENT="Plan output not available for this component."
+            fi
+
+            DETAILS="${DETAILS}
+          <details><summary>Plan: ${component}</summary>
+
+          \`\`\`hcl
+          ${PLAN_CONTENT}
+          \`\`\`
+
+          </details>
+          "
+          done
+
+          # Write to file to avoid shell escaping issues
+          echo "$DETAILS" > /tmp/plan_details.txt
+
+      - name: Create or update Pull Request
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          SOURCE="${{ inputs.feature_branch }}"
+          TARGET="${{ inputs.target_branch }}"
+          ENV="${{ inputs.environment }}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+
+          COMPONENTS_WITH_CHANGES='${{ steps.consolidate.outputs.components_with_changes }}'
+          PLAN_ARTIFACTS='${{ steps.consolidate.outputs.plan_artifacts }}'
+          HAS_CHANGES="${{ steps.consolidate.outputs.has_changes }}"
+          CHANGE_COUNT="${{ steps.consolidate.outputs.change_count }}"
+          TOTAL_COST="${{ steps.consolidate.outputs.total_cost }}"
+          TOTAL_DIFF="${{ steps.consolidate.outputs.total_diff }}"
+
+          # Read table rows
+          TABLE_ROWS=$(cat /tmp/table_rows.txt)
+
+          # Read plan details
+          PLAN_DETAILS=$(cat /tmp/plan_details.txt)
+
+          # Determine overall status
+          if [ "$HAS_CHANGES" = "true" ]; then
+            STATUS_ICON="Changes detected in ${CHANGE_COUNT} component(s)"
+            STATUS_MSG="> Plans saved. CD applies these **exact plans** after merge (no re-plan)."
+          else
+            STATUS_ICON="No changes across all components"
+            STATUS_MSG="> No infrastructure changes. CD will be skipped."
+          fi
+
+          # Determine next environment
+          case "$ENV" in
+            dev)     NEXT_ENV="qa" ;;
+            qa)
+              if [ -n "${{ inputs.preprod_account_id }}" ]; then
+                NEXT_ENV="preprod"
+              else
+                NEXT_ENV="prod"
+              fi
+              ;;
+            preprod) NEXT_ENV="prod" ;;
+            prod)    NEXT_ENV="" ;;
+            *)       NEXT_ENV="" ;;
+          esac
+
+          # Determine approval teams
+          case "$ENV" in
+            dev)     NEXT_APPROVAL_TEAMS="Desarrollo,cloud-ops" ;;
+            qa)      NEXT_APPROVAL_TEAMS="cloud-ops,Seguridad" ;;
+            preprod) NEXT_APPROVAL_TEAMS="cloud-ops,Infraestructura" ;;
+            prod)    NEXT_APPROVAL_TEAMS="" ;;
+            *)       NEXT_APPROVAL_TEAMS="" ;;
+          esac
+
+          # PR Title
+          PR_TITLE="[${ENV^^}] Deploy infrastructure (${CHANGE_COUNT} components) - ${SHORT_SHA}"
+
+          # Build PR body
+          PR_BODY="## Terraform Plan - \`${ENV}\` ${STATUS_ICON}
+
+          | Field | Value |
+          |-------|-------|
+          | **Environment** | \`${ENV}\` |
+          | **Account ID** | \`${{ inputs.account_id }}\` |
+          | **Components** | ${CHANGE_COUNT} with changes / $(echo '${{ inputs.components }}' | jq 'length') total |
+          | **Total cost (monthly)** | \$${TOTAL_COST}/mo |
+          | **Total cost (diff)** | \$${TOTAL_DIFF}/mo |
+          | **Commit** | \`${SHORT_SHA}\` |
+          | **Triggered by** | @${{ github.actor }} |
+          | **CI Run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          ${STATUS_MSG}
+
+          ---
+
+          ### Component Summary
+
+          | Component | Changes | Cost | Security Findings | Status |
+          |-----------|---------|------|-------------------|--------|
+          ${TABLE_ROWS}
+
+          ---
+
+          ${PLAN_DETAILS}
+
+          ---
+          > This PR was auto-created by the CI pipeline (ADR-008 consolidated flow).
+          > Review the plans above and approve to deploy all components in order.
+
+          <!-- DEPLOYMENT_CONTEXT
+          version: 2
+          environment: ${ENV}
+          account_id: ${{ inputs.account_id }}
+          ou_name: ${{ inputs.ou_name }}
+          extra_vars: ${{ inputs.extra_vars }}
+          components_with_changes: ${COMPONENTS_WITH_CHANGES}
+          plan_artifacts: ${PLAN_ARTIFACTS}
+          all_components: ${{ inputs.components }}
+          next_environment: ${NEXT_ENV}
+          approval_teams: ${NEXT_APPROVAL_TEAMS}
+          dev_account_id: ${{ inputs.dev_account_id }}
+          qa_account_id: ${{ inputs.qa_account_id }}
+          preprod_account_id: ${{ inputs.preprod_account_id }}
+          prod_account_id: ${{ inputs.prod_account_id }}
+          dr_enabled: ${{ inputs.dr_enabled }}
+          feature_branch: ${{ inputs.feature_branch }}
+          source_branch: ${SOURCE}
+          target_branch: ${TARGET}
+          ci_run_id: ${{ github.run_id }}
+          commit_sha: ${{ github.sha }}
+          workload: ${{ inputs.workload }}
+          funcionalidad: ${{ inputs.funcionalidad }}
+          service_name: ${{ inputs.service_name }}
+          -->"
+
+          # Check if PR already exists
+          EXISTING_PR=$(gh pr list \
+            --head "$SOURCE" \
+            --base "$TARGET" \
+            --state open \
+            --json number,url \
+            --jq '.[0]' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ] && [ "$EXISTING_PR" != "null" ]; then
+            # Update existing PR
+            PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.number')
+            PR_URL=$(echo "$EXISTING_PR" | jq -r '.url')
+            gh pr edit "$PR_NUMBER" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY"
+            echo "Updated existing PR #${PR_NUMBER}"
+          else
+            # Create new PR
+            PR_URL=$(gh pr create \
+              --head "$SOURCE" \
+              --base "$TARGET" \
+              --title "$PR_TITLE" \
+              --body "$PR_BODY")
+            PR_NUMBER=$(gh pr view "$PR_URL" --json number --jq '.number')
+
+            # Add labels
+            gh pr edit "$PR_NUMBER" --add-label "environment/${ENV}" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --add-label "terraform" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --add-label "needs-review" 2>/dev/null || true
+            gh pr edit "$PR_NUMBER" --add-label "consolidated-plan" 2>/dev/null || true
+
+            echo "Created new PR #${PR_NUMBER}"
+          fi
+
+          # Production label
+          if [ "$ENV" = "prod" ] || [ "$ENV" = "dr" ]; then
+            gh pr edit "$PR_NUMBER" --add-label "production" 2>/dev/null || true
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+          echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### Consolidated Pull Request
+          | Field | Value |
+          |-------|-------|
+          | PR | [#${PR_NUMBER}](${PR_URL}) |
+          | Source | \`${SOURCE}\` |
+          | Target | \`${TARGET}\` |
+          | Environment | \`${ENV}\` |
+          | Components with changes | ${CHANGE_COUNT} |
+          | Components list | ${COMPONENTS_WITH_CHANGES} |
+          | Context version | v2 (multi-component) |
+          EOF

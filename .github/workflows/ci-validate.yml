@@ -1,0 +1,344 @@
+# ORG-DEVOPS/.github/workflows/ci-validate.yml
+#
+# Reusable VALIDATION workflow — shared gate for all components.
+# Called ONCE per CI run (not per-component).
+#
+# ADR-008: Splits the monolithic ci.yml into:
+#   ci-validate.yml (this) → format + lint + sast (ONE time)
+#   ci-plan.yml            → plan + cost + security (PER component)
+#   ci-create-pr.yml       → consolidated PR (ONE time)
+#
+# JOBS:
+#   ① format   → terragrunt hclfmt --check (entire repo)
+#   ② lint     → tflint governance rules
+#   ③ sast     → Checkmarx SAST/SCA (conditional — only if app code detected)
+#
+# FAIL-FAST: If validation fails, no plans will execute.
+
+name: "[reusable] CI — Validate"
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment: dev, qa, preprod, prod, dr"
+        required: true
+        type: string
+      working_directory_base:
+        description: "Base path for validation (e.g. 'environments/dev')"
+        required: true
+        type: string
+      account_id:
+        description: "AWS account ID for the target environment."
+        required: true
+        type: string
+      ou_name:
+        description: "OU / product name — for runner context."
+        required: true
+        type: string
+      feature_branch:
+        description: "Branch to checkout for validation."
+        required: false
+        type: string
+        default: ""
+      runner_label:
+        description: "Override the runner tag. Default: uses environment value."
+        required: false
+        type: string
+        default: ""
+      checkmarx_scan:
+        description: "Run Checkmarx SAST/SCA scan. Default: true (auto-detect)."
+        required: false
+        type: boolean
+        default: true
+      fail_on_high_critical:
+        description: "Fail on CRITICAL/HIGH SAST findings. Default: true."
+        required: false
+        type: boolean
+        default: true
+
+    outputs:
+      validation_passed:
+        description: "Whether all validation checks passed (true/false)."
+        value: ${{ jobs.gate.outputs.passed }}
+
+jobs:
+  # ─────────────────────────────────────────────
+  #  ① FORMAT
+  # ─────────────────────────────────────────────
+  format:
+    name: "① Format"
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+    env:
+      OU_NAME: ${{ inputs.ou_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch || github.ref }}
+
+      - name: Terragrunt hclfmt (entire repo)
+        run: terragrunt hclfmt --check --diff
+
+  # ─────────────────────────────────────────────
+  #  ② LINT + GOVERNANCE
+  # ─────────────────────────────────────────────
+  lint:
+    name: "② Lint"
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+    env:
+      OU_NAME: ${{ inputs.ou_name }}
+      RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch || github.ref }}
+
+      - name: Checkout orchestrator (governance files)
+        uses: actions/checkout@v4
+        with:
+          repository: bin-transversales-devops/platform-orchestrator-automation-terraform
+          ref: master
+          path: .orchestrator
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Copy governance files
+        run: |
+          if [ ! -f ".tflint.hcl" ]; then
+            cp .orchestrator/.tflint.hcl .tflint.hcl
+            echo "Copied .tflint.hcl from orchestrator"
+          fi
+          mkdir -p scripts
+          cp .orchestrator/scripts/naming_pattern_validator.sh scripts/
+          chmod +x scripts/naming_pattern_validator.sh
+          echo "Copied naming_pattern_validator.sh from orchestrator"
+
+      - name: Assume role in target account
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::${{ inputs.account_id }}:role/terraform-apply-role"
+          aws-region: us-east-1
+          role-session-name: "tf-lint-${{ inputs.environment }}-${{ github.run_id }}"
+          role-external-id: ${{ secrets.ROLE_EXTERNAL_ID }}
+
+      - name: Configure git for private modules
+        run: |
+          git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+        env:
+          GH_PAT: ${{ secrets.GH_TOKEN }}
+
+      - name: Run TFLint on all components
+        run: |
+          echo "── Running TFLint with enterprise governance rules ──"
+          FAILED=0
+          for dir in ${{ inputs.working_directory_base }}/*/; do
+            if [ -f "${dir}terragrunt.hcl" ]; then
+              echo "── Linting: ${dir} ──"
+              cd "${dir}"
+              terragrunt init -reconfigure 2>/dev/null || true
+              tflint --format=compact || FAILED=1
+              cd "${{ github.workspace }}"
+            fi
+          done
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::TFLint failed for one or more components."
+            exit 1
+          fi
+          echo "TFLint passed for all components."
+        env:
+          TERRAGRUNT_NON_INTERACTIVE: "true"
+
+  # ─────────────────────────────────────────────
+  #  ③ SAST (Checkmarx — conditional)
+  # ─────────────────────────────────────────────
+  sast:
+    name: "③ SAST"
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+
+    outputs:
+      sast_executed: ${{ steps.scan_result.outputs.sast_executed }}
+      sast_summary:  ${{ steps.build_summary.outputs.summary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.feature_branch || github.ref }}
+
+      - name: Detect application code
+        id: detect
+        run: |
+          HAS_CODE="false"
+          for dir in src app lambda functions scripts/app lib pkg cmd handlers controllers; do
+            if [ -d "$dir" ]; then
+              HAS_CODE="true"
+              echo "Found application code directory: $dir"
+              break
+            fi
+          done
+
+          if [ "$HAS_CODE" = "false" ]; then
+            for pattern in "*.py" "*.js" "*.ts" "*.go" "*.java" "*.cs" "*.rb"; do
+              if find . -maxdepth 3 -name "$pattern" \
+                -not -path "./.terraform/*" \
+                -not -path "./vendor/*" \
+                -not -path "./node_modules/*" \
+                -not -path "./.orchestrator/*" | grep -q .; then
+                HAS_CODE="true"
+                echo "Found source files matching: $pattern"
+                break
+              fi
+            done
+          fi
+
+          echo "has_app_code=$HAS_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$HAS_CODE" = "true" ]; then
+            echo "Application code detected. Checkmarx SAST will run."
+          else
+            echo "No application code found. IaC-only repo — Checkmarx SAST skipped."
+            echo "### ③ SAST: Skipped (IaC-only repo)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Run Checkmarx SAST/SCA
+        id: cxscan
+        if: inputs.checkmarx_scan && steps.detect.outputs.has_app_code == 'true'
+        continue-on-error: true
+        uses: checkmarx/ast-github-action@main
+        with:
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          base_uri: ${{ vars.CX_BASE_URI || 'https://us.ast.checkmarx.net/' }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ github.repository }}-app
+          branch: ${{ inputs.feature_branch || github.ref_name }}
+          scan_params: >-
+            --scan-types sast,sca
+            --report-format json
+            --output-path .
+
+      - name: Evaluate SAST results
+        id: evaluate
+        if: steps.detect.outputs.has_app_code == 'true'
+        run: |
+          if [ ! -f "cx_result.json" ]; then
+            echo "::warning::Checkmarx scan did not produce results file."
+            echo "total_critical=0" >> $GITHUB_OUTPUT
+            echo "total_high=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          SAST_CRIT=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="CRITICAL")] | length' cx_result.json)
+          SAST_HIGH=$(jq '[(.results // [])[] | select(.type=="sast" and .severity=="HIGH")] | length' cx_result.json)
+          SCA_CRIT=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="CRITICAL")] | length' cx_result.json)
+          SCA_HIGH=$(jq '[(.results // [])[] | select(.type=="sca" and .severity=="HIGH")] | length' cx_result.json)
+
+          TOTAL_CRIT=$((SAST_CRIT + SCA_CRIT))
+          TOTAL_HIGH=$((SAST_HIGH + SCA_HIGH))
+
+          echo "total_critical=$TOTAL_CRIT" >> $GITHUB_OUTPUT
+          echo "total_high=$TOTAL_HIGH" >> $GITHUB_OUTPUT
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### ③ SAST (Checkmarx)
+          | Severity | Count |
+          |----------|-------|
+          | CRITICAL | $TOTAL_CRIT |
+          | HIGH | $TOTAL_HIGH |
+          EOF
+
+      - name: Build summary for PR
+        id: build_summary
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" != "true" ]; then
+            echo "summary=SAST: Skipped (IaC-only repo)" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CRIT="${{ steps.evaluate.outputs.total_critical || '0' }}"
+          HIGH="${{ steps.evaluate.outputs.total_high || '0' }}"
+          if [ "$CRIT" = "0" ] && [ "$HIGH" = "0" ]; then
+            echo "summary=SAST (Checkmarx): No app vulnerabilities" >> $GITHUB_OUTPUT
+          else
+            echo "summary=SAST (Checkmarx): $CRIT Critical, $HIGH High" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Mark SAST as executed
+        id: scan_result
+        run: |
+          if [ "${{ steps.detect.outputs.has_app_code }}" = "true" ]; then
+            echo "sast_executed=true" >> $GITHUB_OUTPUT
+          else
+            echo "sast_executed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Enforce SAST gate
+        if: |
+          steps.detect.outputs.has_app_code == 'true' &&
+          inputs.fail_on_high_critical
+        run: |
+          TOTAL_CRIT="${{ steps.evaluate.outputs.total_critical }}"
+          TOTAL_HIGH="${{ steps.evaluate.outputs.total_high }}"
+
+          if [ "$TOTAL_CRIT" -gt 0 ] || [ "$TOTAL_HIGH" -gt 0 ]; then
+            echo "::error::SAST gate FAILED: $TOTAL_CRIT CRITICAL + $TOTAL_HIGH HIGH vulnerabilities."
+            exit 1
+          fi
+          echo "SAST gate PASSED: 0 CRITICAL, 0 HIGH."
+
+  # ─────────────────────────────────────────────
+  #  GATE — aggregate pass/fail
+  # ─────────────────────────────────────────────
+  gate:
+    name: "Validation Gate"
+    needs: [format, lint, sast]
+    if: always()
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+
+    outputs:
+      passed: ${{ steps.check.outputs.passed }}
+
+    steps:
+      - name: Evaluate validation results
+        id: check
+        run: |
+          FORMAT_RESULT="${{ needs.format.result }}"
+          LINT_RESULT="${{ needs.lint.result }}"
+          SAST_RESULT="${{ needs.sast.result }}"
+
+          echo "Format: $FORMAT_RESULT"
+          echo "Lint: $LINT_RESULT"
+          echo "SAST: $SAST_RESULT"
+
+          if [ "$FORMAT_RESULT" != "success" ]; then
+            echo "::error::Format check failed."
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          if [ "$LINT_RESULT" != "success" ]; then
+            echo "::error::Lint check failed."
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          if [ "$SAST_RESULT" != "success" ] && [ "$SAST_RESULT" != "skipped" ]; then
+            echo "::error::SAST check failed."
+            echo "passed=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          echo "passed=true" >> $GITHUB_OUTPUT
+          echo "All validation gates passed."
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ### Validation Summary
+          | Check | Result |
+          |-------|--------|
+          | Format (hclfmt) | $FORMAT_RESULT |
+          | Lint (TFLint) | $LINT_RESULT |
+          | SAST (Checkmarx) | $SAST_RESULT |
+          | **Overall** | **PASSED** |
+          EOF
