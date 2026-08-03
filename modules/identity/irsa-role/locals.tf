@@ -4,7 +4,8 @@
 #
 # HARDENING CONTRACT:
 #   LOCKED     — Trust uses StringEquals (never StringLike with wildcards),
-#                audience locked to sts.amazonaws.com, SourceAccount condition,
+#                audience locked to "openshift" (ROSA HCP token audience),
+#                SourceAccount condition,
 #                max session 3600s (1 hour — short-lived credentials only),
 #                IAM path /irsa/ (enables IAM policy scoping + audit filtering),
 #                role naming convention enforced.
