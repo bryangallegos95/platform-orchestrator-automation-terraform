@@ -353,6 +353,7 @@ jobs:
     runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
     env:
       OU_NAME: ${{ inputs.ou_name }}
+      TF_VAR_aws_account_id: ${{ inputs.account_id }}
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
 
     outputs:

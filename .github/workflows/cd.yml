@@ -167,6 +167,7 @@ jobs:
 
     env:
       OU_NAME: ${{ inputs.ou_name }}
+      TF_VAR_aws_account_id: ${{ inputs.account_id }}
       APPLY_FAILED: "false"
       RHCS_TOKEN: ${{ secrets.RHCS_TOKEN }}
 
