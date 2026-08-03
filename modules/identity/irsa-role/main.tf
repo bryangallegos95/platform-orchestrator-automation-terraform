@@ -17,7 +17,7 @@
 #
 # Hardening baked in (not configurable off):
 #   - Trust: StringEquals (exact SA match, never StringLike wildcards)
-#   - Audience: sts.amazonaws.com (prevents token reuse from other IdPs)
+#   - Audience: "openshift" (ROSA HCP projected token audience)
 #   - Max session: 3600s ceiling (short-lived credentials only)
 #   - IAM path: /irsa/ (audit + policy scoping)
 

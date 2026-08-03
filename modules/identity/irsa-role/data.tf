@@ -24,7 +24,7 @@ data "aws_iam_openid_connect_provider" "rosa" {
 #
 # SECURITY (LOCKED):
 #   - StringEquals ONLY (never StringLike — no wildcards allowed)
-#   - Audience locked to sts.amazonaws.com
+#   - Audience locked to "openshift" (ROSA HCP projected token audience)
 #   - Each SA is an exact match: system:serviceaccount:{ns}:{name}
 data "aws_iam_policy_document" "trust" {
   for_each = local.roles
@@ -39,11 +39,11 @@ data "aws_iam_policy_document" "trust" {
       identifiers = [local.oidc_provider_arn]
     }
 
-    # 🔒 LOCKED — Audience must be sts.amazonaws.com
+    # 🔒 LOCKED — Audience must be "openshift" (ROSA HCP token audience)
     condition {
       test     = "StringEquals"
       variable = "${local.oidc_issuer_url}:aud"
-      values   = ["sts.amazonaws.com"]
+      values   = ["openshift"]
     }
 
     # 🔒 LOCKED — Exact ServiceAccount match (StringEquals, not StringLike)
