@@ -36,3 +36,14 @@ output "kms_key_arn" {
   description = "ARN of the KMS CMK used for queue encryption."
   value       = local.kms_key_arn
 }
+
+# ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+output "dlq_alarm_arns" {
+  description = "Map of queue key → DLQ depth alarm ARN."
+  value       = { for k, a in aws_cloudwatch_metric_alarm.dlq_depth : k => a.arn }
+}
+
+output "age_alarm_arns" {
+  description = "Map of queue key → message age alarm ARN."
+  value       = { for k, a in aws_cloudwatch_metric_alarm.queue_age : k => a.arn }
+}

@@ -233,13 +233,16 @@ variable "sqs_queues" {
 
 variable "sqs_config" {
   description = <<-EOT
-    Additional SQS configuration (KMS, etc.).
+    Additional SQS configuration (KMS, alarms, etc.).
     Only evaluated when sqs_enabled = true.
   EOT
   type = object({
     kms_key_alias                     = optional(string, "alias/SQS_SNS")
     kms_key_arn                       = optional(string, "")
     kms_data_key_reuse_period_seconds = optional(number, 300)
+    alarm_dlq_threshold               = optional(number, 0)
+    alarm_age_threshold_seconds       = optional(number, 300)
+    alarm_actions                     = optional(list(string), [])
   })
   default = {}
 }
