@@ -59,7 +59,11 @@ resource "aws_elasticache_serverless_cache" "this" {
 
   tags = merge(local.tags, { Name = local.cache_name })
 
-  depends_on = [terraform_data.guards]
+  depends_on = [
+    terraform_data.guards,
+    aws_cloudwatch_log_group.slow_log,
+    aws_cloudwatch_log_group.engine_log,
+  ]
 
   lifecycle {
     # FinOps: snapshot retention floor enforcement

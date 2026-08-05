@@ -75,6 +75,20 @@ locals {
   effective_max_ecpu    = coalesce(var.max_ecpu_per_second, local.ecpu_ceiling)
   effective_max_storage = coalesce(var.max_data_storage_gb, local.storage_ceiling_gb)
 
+  # ── CloudWatch Logs — KMS resolution ───────────────────────────────────
+  # Explicit ARN wins; otherwise resolve the account's pre-existing CMK by
+  # alias (see data.tf). The module never creates keys.
+  cloudwatch_logs_kms_key_arn = var.cloudwatch_logs_kms_key_arn != "" ? var.cloudwatch_logs_kms_key_arn : data.aws_kms_alias.cwlogs[0].target_key_arn
+
+  # ── CloudWatch Logs — managed log group names (see logs.tf) ──────────────
+  slow_log_group_name   = "/aws/elasticache/${local.cache_name}/slow-log"
+  engine_log_group_name = "/aws/elasticache/${local.cache_name}/engine-log"
+
+  # 🛡️ GUARD-RAIL — retention floor by environment; a son repo may set a longer
+  # retention but the module keeps the environment default when unset.
+  default_log_retention_days = contains(["prod", "dr"], var.ambiente) ? 365 : (var.ambiente == "preprod" ? 90 : 30)
+  log_retention_days         = coalesce(var.cloudwatch_log_retention_days, local.default_log_retention_days)
+
   # ── Tag factory ─────────────────────────────────────────────────────────
   mandatory_tags = {
     Aplicacion         = var.aplicacion

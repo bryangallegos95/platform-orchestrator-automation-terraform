@@ -47,3 +47,19 @@ output "vpc_id" {
   description = "VPC ID where the cache is deployed."
   value       = data.aws_vpc.spoke.id
 }
+
+output "log_group_names" {
+  description = "CloudWatch Log Group names for ElastiCache log delivery (slow-log + engine-log)."
+  value = {
+    slow_log   = aws_cloudwatch_log_group.slow_log.name
+    engine_log = aws_cloudwatch_log_group.engine_log.name
+  }
+}
+
+output "log_group_arns" {
+  description = "CloudWatch Log Group ARNs for ElastiCache log delivery."
+  value = {
+    slow_log   = aws_cloudwatch_log_group.slow_log.arn
+    engine_log = aws_cloudwatch_log_group.engine_log.arn
+  }
+}
