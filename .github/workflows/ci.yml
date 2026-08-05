@@ -1111,6 +1111,7 @@ jobs:
           source_branch: ${SOURCE}
           target_branch: ${TARGET}
           ci_run_id: ${{ github.run_id }}
+          port_run_id: ${{ inputs.port_run_id }}
           monthly_cost: ${MONTHLY_COST}
           cost_diff: ${COST_DIFF}
           -->"

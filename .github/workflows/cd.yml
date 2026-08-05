@@ -85,6 +85,13 @@ on:
         type: string
         default: ""
 
+      # ─── Port.io log streaming ────────────────────────────────
+      port_run_id:
+        description: "Port.io action run ID for log streaming. If empty, logs are skipped."
+        required: false
+        type: string
+        default: ""
+
       # ─── Context for promotion ─────────────────────────────────
       dev_account_id:
         description: "DEV account ID."
@@ -124,6 +131,9 @@ on:
       promotion_issue_number:
         description: "Issue number if created."
         value: ${{ jobs.promote.outputs.issue_number }}
+      promotion_issue_url:
+        description: "Issue URL if created."
+        value: ${{ jobs.promote.outputs.issue_url }}
 
 concurrency:
   group: "tf-cd-${{ inputs.environment }}-${{ inputs.ou_name }}"
@@ -241,6 +251,23 @@ jobs:
             cp -r /tmp/plan-download/plans "${WORK_DIR}/plans"
           fi
 
+      # ─── Port.io log: apply starting ───
+      - name: Log to Port — Apply starting
+        if: inputs.port_run_id != '' && inputs.plan_exitcode != '0'
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"message": "Ejecutando terraform apply en ${{ inputs.environment }}..."}'
 
       - name: Terragrunt apply
         id: apply
@@ -357,6 +384,56 @@ jobs:
             echo "value=success" >> $GITHUB_OUTPUT
           fi
 
+      # ─── Port.io log: apply result with full terraform output ───
+      - name: Log to Port — Apply result
+        if: always() && inputs.port_run_id != '' && inputs.plan_exitcode != '0'
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+
+          OUTCOME="${{ steps.outcome.outputs.value }}"
+          DURATION="${{ steps.apply.outputs.apply_duration }}"
+
+          # ── Build header message ──
+          if [ "$OUTCOME" = "success" ]; then
+            HEADER="Apply exitoso en ${{ inputs.environment }} (${DURATION})"
+          elif [ "$OUTCOME" = "failed" ]; then
+            HEADER="Apply FALLIDO en ${{ inputs.environment }} (${DURATION})"
+          else
+            HEADER="Apply omitido: sin cambios de infraestructura."
+          fi
+
+          # Send header log
+          jq -n --arg msg "$HEADER" '{"message": $msg}' | \
+            curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @-
+
+          # ── Send full terraform output (truncated to 50KB) ──
+          if [ -f /tmp/apply_output.txt ] && [ -s /tmp/apply_output.txt ]; then
+            # Truncate to 50KB to stay well under Port's 1MiB limit
+            APPLY_OUTPUT=$(head -c 51200 /tmp/apply_output.txt)
+            if [ $(wc -c < /tmp/apply_output.txt) -gt 51200 ]; then
+              APPLY_OUTPUT="${APPLY_OUTPUT}
+          ... (output truncado a 50KB)"
+            fi
+
+            # Use jq for proper JSON escaping of multiline terraform output
+            jq -n --arg msg "$APPLY_OUTPUT" '{"message": $msg}' | \
+              curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d @-
+          fi
+
       - name: Fail job on apply error
         if: env.APPLY_FAILED == 'true'
         run: exit 1
@@ -376,6 +453,7 @@ jobs:
 
     outputs:
       issue_number: ${{ steps.create_issue.outputs.issue_number }}
+      issue_url:    ${{ steps.create_issue.outputs.issue_url }}
 
     steps:
       - name: Create promotion issue
@@ -435,4 +513,25 @@ jobs:
 
           ISSUE_NUMBER=$(gh issue view "$ISSUE_URL" --json number --jq '.number')
           echo "issue_number=${ISSUE_NUMBER}" >> $GITHUB_OUTPUT
+          echo "issue_url=${ISSUE_URL}" >> $GITHUB_OUTPUT
           echo "Created promotion issue #${ISSUE_NUMBER}"
+
+      # ─── Port.io log: promotion issue created ───
+      - name: Log to Port — Promotion issue created
+        if: inputs.port_run_id != '' && steps.create_issue.outputs.issue_number != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          ISSUE_URL="${{ steps.create_issue.outputs.issue_url }}"
+          NEXT_ENV="${{ inputs.next_environment }}"
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"Promotion issue creado: ${ISSUE_URL}. Aprueba con label approved-for-${NEXT_ENV} para promover.\", \"terminationStatus\": \"SUCCESS\", \"statusLabel\": \"Desplegado en ${{ inputs.environment }}\"}"
