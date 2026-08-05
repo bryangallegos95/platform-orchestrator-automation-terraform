@@ -91,6 +91,16 @@ on:
         required: false
         type: string
         default: ""
+      port_client_id:
+        description: "Port.io client ID (pass from vars.PORT_CLIENT_ID of the calling repo)."
+        required: false
+        type: string
+        default: ""
+      port_base_url:
+        description: "Port.io API base URL (pass from vars.PORT_API_BASE_URL of the calling repo)."
+        required: false
+        type: string
+        default: "https://api.us.getport.io"
 
       # ─── Context for promotion ─────────────────────────────────
       dev_account_id:
@@ -255,9 +265,9 @@ jobs:
       - name: Log to Port — Apply starting
         if: inputs.port_run_id != '' && inputs.plan_exitcode != '0'
         env:
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_ID: ${{ inputs.port_client_id }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+          PORT_API_BASE_URL: ${{ inputs.port_base_url }}
         run: |
           PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
           TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
@@ -388,9 +398,9 @@ jobs:
       - name: Log to Port — Apply result
         if: always() && inputs.port_run_id != '' && inputs.plan_exitcode != '0'
         env:
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_ID: ${{ inputs.port_client_id }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+          PORT_API_BASE_URL: ${{ inputs.port_base_url }}
         run: |
           PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
           TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
@@ -520,9 +530,9 @@ jobs:
       - name: Log to Port — Promotion issue created
         if: inputs.port_run_id != '' && steps.create_issue.outputs.issue_number != ''
         env:
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_ID: ${{ inputs.port_client_id }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+          PORT_API_BASE_URL: ${{ inputs.port_base_url }}
         run: |
           PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
           TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
@@ -551,9 +561,9 @@ jobs:
     steps:
       - name: Close Port run with FAILURE
         env:
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_ID: ${{ inputs.port_client_id }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+          PORT_API_BASE_URL: ${{ inputs.port_base_url }}
         run: |
           PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
           TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
@@ -581,9 +591,9 @@ jobs:
     steps:
       - name: Close Port run with SUCCESS (no promotion needed)
         env:
-          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_ID: ${{ inputs.port_client_id }}
           PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
-          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+          PORT_API_BASE_URL: ${{ inputs.port_base_url }}
         run: |
           PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
           TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
