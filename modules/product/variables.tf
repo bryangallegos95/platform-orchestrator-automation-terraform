@@ -282,6 +282,8 @@ variable "redis_config" {
     user_group_id = optional(string, "")
     kms_key_alias = optional(string, "alias/ElastiCache")
     kms_key_arn   = optional(string, "")
+    cloudwatch_logs_kms_key_alias = optional(string, "alias/CWLogs")
+    cloudwatch_logs_kms_key_arn   = optional(string, "")
   })
   default = {}
 }

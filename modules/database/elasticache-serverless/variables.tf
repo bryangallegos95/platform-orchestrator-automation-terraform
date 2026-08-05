@@ -193,6 +193,40 @@ variable "kms_consumer_role_arns" {
   }
 }
 
+# ── CloudWatch Logs (managed log groups — see logs.tf) ─────────────────────────
+variable "cloudwatch_logs_kms_key_alias" {
+  description = "Alias of the account's pre-existing CloudWatch Logs CMK, used to encrypt the managed slow-log and engine-log groups. Canonical account baseline alias is 'alias/CWLogs' (case-sensitive)."
+  type        = string
+  default     = "alias/CWLogs"
+
+  validation {
+    condition     = can(regex("^alias/", var.cloudwatch_logs_kms_key_alias))
+    error_message = "cloudwatch_logs_kms_key_alias must start with 'alias/'."
+  }
+}
+
+variable "cloudwatch_logs_kms_key_arn" {
+  description = "Explicit CloudWatch Logs KMS key ARN override. \"\" (empty) => discover by cloudwatch_logs_kms_key_alias."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.cloudwatch_logs_kms_key_arn == "" || can(regex("^arn:aws:kms:", var.cloudwatch_logs_kms_key_arn))
+    error_message = "cloudwatch_logs_kms_key_arn must be empty or a valid KMS key ARN."
+  }
+}
+
+variable "cloudwatch_log_retention_days" {
+  description = "Retention (days) for the managed CloudWatch log groups (slow-log + engine-log). null = auto by environment: 30 (dev/qa), 90 (preprod), 365 (prod/dr). A son repo may set a longer value."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.cloudwatch_log_retention_days == null ? true : contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.cloudwatch_log_retention_days)
+    error_message = "cloudwatch_log_retention_days must be null or a valid CloudWatch Logs retention value (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653)."
+  }
+}
+
 # ── Network access ────────────────────────────────────────────────────────────
 variable "allowed_security_group_ids" {
   description = "Consumer Security Group IDs granted cache port access (6379+6380). Default [] = no inbound."

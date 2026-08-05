@@ -51,3 +51,10 @@ data "aws_kms_alias" "elasticache" {
   count = var.kms_key_arn == "" ? 1 : 0
   name  = var.kms_key_alias
 }
+
+# Pre-existing account CloudWatch Logs CMK — encrypts the managed log groups
+# (see logs.tf). Resolved by alias unless an explicit ARN is supplied.
+data "aws_kms_alias" "cwlogs" {
+  count = var.cloudwatch_logs_kms_key_arn == "" ? 1 : 0
+  name  = var.cloudwatch_logs_kms_key_alias
+}
