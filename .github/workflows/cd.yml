@@ -384,7 +384,7 @@ jobs:
             echo "value=success" >> $GITHUB_OUTPUT
           fi
 
-      # ─── Port.io log: apply result with terraform output ───
+      # ─── Port.io log: apply result with full terraform output ───
       - name: Log to Port — Apply result
         if: always() && inputs.port_run_id != '' && inputs.plan_exitcode != '0'
         env:
@@ -401,28 +401,38 @@ jobs:
           OUTCOME="${{ steps.outcome.outputs.value }}"
           DURATION="${{ steps.apply.outputs.apply_duration }}"
 
-          # Extract terraform apply summary from output
-          APPLY_SUMMARY=""
-          if [ -f /tmp/apply_output.txt ]; then
-            # Get the "Apply complete!" line or error summary
-            APPLY_SUMMARY=$(grep -E "Apply complete!|Error:|applied|destroyed" /tmp/apply_output.txt | tail -3 | tr '\n' ' ' | cut -c1-200)
-          fi
-
+          # ── Build header message ──
           if [ "$OUTCOME" = "success" ]; then
-            MSG="Apply exitoso en ${{ inputs.environment }} (${DURATION}). ${APPLY_SUMMARY}"
+            HEADER="Apply exitoso en ${{ inputs.environment }} (${DURATION})"
           elif [ "$OUTCOME" = "failed" ]; then
-            MSG="Apply FALLIDO en ${{ inputs.environment }} (${DURATION}). ${APPLY_SUMMARY}"
+            HEADER="Apply FALLIDO en ${{ inputs.environment }} (${DURATION})"
           else
-            MSG="Apply omitido: sin cambios de infraestructura."
+            HEADER="Apply omitido: sin cambios de infraestructura."
           fi
 
-          # Escape for JSON
-          MSG=$(echo "$MSG" | sed 's/"/\\"/g' | tr -d '\n')
+          # Send header log
+          jq -n --arg msg "$HEADER" '{"message": $msg}' | \
+            curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d @-
 
-          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
-            -H "Authorization: Bearer ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"message\": \"${MSG}\"}"
+          # ── Send full terraform output (truncated to 50KB) ──
+          if [ -f /tmp/apply_output.txt ] && [ -s /tmp/apply_output.txt ]; then
+            # Truncate to 50KB to stay well under Port's 1MiB limit
+            APPLY_OUTPUT=$(head -c 51200 /tmp/apply_output.txt)
+            if [ $(wc -c < /tmp/apply_output.txt) -gt 51200 ]; then
+              APPLY_OUTPUT="${APPLY_OUTPUT}
+          ... (output truncado a 50KB)"
+            fi
+
+            # Use jq for proper JSON escaping of multiline terraform output
+            jq -n --arg msg "$APPLY_OUTPUT" '{"message": $msg}' | \
+              curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+                -H "Authorization: Bearer ${TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d @-
+          fi
 
       - name: Fail job on apply error
         if: env.APPLY_FAILED == 'true'
