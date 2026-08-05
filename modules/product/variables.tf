@@ -363,6 +363,22 @@ variable "irsa_roles" {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# NEW RELIC SPOKE (OBSERVABILITY)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+variable "newrelic_enabled" {
+  description = "Enable the New Relic spoke building block. Creates subscription filters that forward all workload CloudWatch Log Groups to the centralized hub destination."
+  type        = bool
+  default     = false
+}
+
+variable "newrelic_hub_destination_arn" {
+  description = "ARN of the centralized CloudWatch Logs Destination or Kinesis Data Stream (hub account). Required when newrelic_enabled = true."
+  type        = string
+  default     = ""
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SECRETS (injected from BeyondTrust via TF_VAR_*)
 # ═══════════════════════════════════════════════════════════════════════════════
 

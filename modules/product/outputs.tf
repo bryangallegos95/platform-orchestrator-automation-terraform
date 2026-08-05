@@ -183,10 +183,19 @@ output "sqs_age_alarm_arns" {
 
 output "all_log_group_names" {
   description = "Consolidated list of all CloudWatch Log Group names from enabled building blocks. Used by the New Relic spoke to subscribe to all workload logs."
-  value = concat(
-    # Aurora PostgreSQL log group
-    var.aurora_enabled ? [module.aurora[0].cloudwatch_log_group_name] : [],
-    # ElastiCache Serverless does not produce CloudWatch Log Groups
-    # SQS does not produce CloudWatch Log Groups
-  )
+  value       = local.all_log_group_names
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW RELIC SPOKE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+output "newrelic_subscription_filter_arns" {
+  description = "Map of sanitized log group key to subscription filter ARN."
+  value       = var.newrelic_enabled ? module.newrelic_spoke[0].subscription_filter_arns : {}
+}
+
+output "newrelic_iam_role_arn" {
+  description = "ARN of the IAM role assumed by CloudWatch Logs for the New Relic spoke."
+  value       = var.newrelic_enabled ? module.newrelic_spoke[0].iam_role_arn : ""
 }
