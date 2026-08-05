@@ -535,3 +535,62 @@ jobs:
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{\"message\": \"Promotion issue creado: ${ISSUE_URL}. Aprueba con label approved-for-${NEXT_ENV} para promover.\", \"terminationStatus\": \"SUCCESS\", \"statusLabel\": \"Desplegado en ${{ inputs.environment }}\"}"
+
+  # ─────────────────────────────────────────────
+  #  ③ REPORT FAILURE — close Port run on apply error
+  # ─────────────────────────────────────────────
+  report-failure:
+    name: "③ Report Failure to Port"
+    needs: [apply]
+    if: |
+      always() &&
+      needs.apply.outputs.outcome == 'failed' &&
+      inputs.port_run_id != ''
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+
+    steps:
+      - name: Close Port run with FAILURE
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"Apply fallido en ${{ inputs.environment }}. Revisa los logs de GitHub Actions.\", \"terminationStatus\": \"FAILURE\", \"statusLabel\": \"Apply fallido\"}"
+
+  # ─────────────────────────────────────────────
+  #  ④ REPORT SUCCESS (no promotion) — close Port run
+  # ─────────────────────────────────────────────
+  report-success-no-promote:
+    name: "④ Report Success (no promote)"
+    needs: [apply, promote]
+    if: |
+      always() &&
+      needs.apply.outputs.outcome == 'success' &&
+      (needs.promote.result == 'skipped' || needs.promote.outputs.issue_number == '') &&
+      inputs.port_run_id != ''
+    runs-on: [self-hosted, terraform, "${{ inputs.runner_label || inputs.environment }}"]
+
+    steps:
+      - name: Close Port run with SUCCESS (no promotion needed)
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"Apply exitoso en ${{ inputs.environment }}. Despliegue completado.\", \"terminationStatus\": \"SUCCESS\", \"statusLabel\": \"Desplegado en ${{ inputs.environment }}\"}"
