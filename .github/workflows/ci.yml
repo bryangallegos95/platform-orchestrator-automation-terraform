@@ -104,6 +104,13 @@ on:
         default: "terraform-apply-role"
 
 
+      # ─── Port.io log streaming ────────────────────────────────
+      port_run_id:
+        description: "Port.io action run ID for log streaming. If empty, logs are skipped."
+        required: false
+        type: string
+        default: ""
+
       # ─── Deployment context (passthrough for promotion chain) ───
       dev_account_id:
         description: "DEV account ID."
@@ -177,6 +184,24 @@ jobs:
       is_multi_component: ${{ steps.detect.outputs.is_multi_component }}
 
     steps:
+      # ─── Port.io log: CI started ───
+      - name: Log to Port — CI started
+        if: inputs.port_run_id != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"CI iniciado: environment=${{ inputs.environment }}, account=${{ inputs.account_id }}\"}"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -498,6 +523,23 @@ jobs:
           rm -f "$BT_COOKIE"
           echo "── BeyondTrust session closed. ──"
 
+      # ─── Port.io log: plan starting ───
+      - name: Log to Port — Executing plan
+        if: inputs.port_run_id != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d '{"message": "Ejecutando terraform plan en ${{ inputs.environment }}..."}'
 
       - name: Terragrunt plan
         id: plan
@@ -906,6 +948,37 @@ jobs:
       pr_url:    ${{ steps.pr.outputs.pr_url }}
 
     steps:
+      # ─── Port.io log: plan completed ───
+      - name: Log to Port — Plan result
+        if: inputs.port_run_id != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+
+          EXITCODE="${{ needs.plan.outputs.exitcode }}"
+          if [ "$EXITCODE" = "0" ]; then
+            MSG="Plan completado: Sin cambios de infraestructura."
+          else
+            MSG="Plan completado: Cambios detectados. Creando PR..."
+          fi
+
+          COST="${{ needs.cost.outputs.monthly_cost }}"
+          if [ -n "$COST" ] && [ "$COST" != "N/A" ]; then
+            MSG="${MSG} Costo estimado: \$${COST}/mo"
+          fi
+
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"${MSG}\"}"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -1070,3 +1143,43 @@ jobs:
 
           echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
           echo "pr_url=${PR_URL}" >> $GITHUB_OUTPUT
+
+      # ─── Auto-merge for DEV PRs (no manual intervention needed) ───
+      - name: Auto-merge PR (dev only)
+        if: inputs.environment == 'dev' && steps.pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          PR_NUM="${{ steps.pr.outputs.pr_number }}"
+          echo "Enabling auto-merge for PR #${PR_NUM} (target: dev)"
+          gh pr merge "${PR_NUM}" \
+            --repo "${{ github.repository }}" \
+            --merge \
+            --auto || {
+            echo "::warning::Auto-merge could not be enabled. Ensure 'Allow auto-merge' is enabled in repo settings."
+            echo "PR #${PR_NUM} requires manual merge."
+          }
+
+      # ─── Port.io log: PR created ───
+      - name: Log to Port — PR created
+        if: inputs.port_run_id != '' && steps.pr.outputs.pr_url != ''
+        env:
+          PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+          PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+          PORT_API_BASE_URL: ${{ vars.PORT_API_BASE_URL || 'https://api.us.getport.io' }}
+        run: |
+          PORT_API_BASE_URL="${PORT_API_BASE_URL%/}"
+          TOKEN=$(curl -sSfL -X POST "${PORT_API_BASE_URL}/v1/auth/access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"clientId\":\"${PORT_CLIENT_ID}\",\"clientSecret\":\"${PORT_CLIENT_SECRET}\"}" \
+            | jq -r '.accessToken')
+
+          AUTO_MERGE_MSG=""
+          if [ "${{ inputs.environment }}" = "dev" ]; then
+            AUTO_MERGE_MSG=" Auto-merge habilitado."
+          fi
+
+          curl -sSL -X POST "${PORT_API_BASE_URL}/v1/actions/runs/${{ inputs.port_run_id }}/logs" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"message\": \"PR creado: ${{ steps.pr.outputs.pr_url }}.${AUTO_MERGE_MSG}\"}"
