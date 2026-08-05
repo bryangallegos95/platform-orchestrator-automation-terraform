@@ -257,3 +257,37 @@ variable "extra_tags" {
   type        = map(string)
   default     = {}
 }
+
+# ── CloudWatch Alarms ─────────────────────────────────────────────────────────
+variable "alarm_dlq_threshold" {
+  description = "Threshold for DLQ depth alarm (ApproximateNumberOfMessagesVisible). Default 0 means any message in DLQ triggers the alarm."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.alarm_dlq_threshold >= 0
+    error_message = "alarm_dlq_threshold must be >= 0."
+  }
+}
+
+variable "alarm_age_threshold_seconds" {
+  description = "Threshold in seconds for main queue message age alarm (ApproximateAgeOfOldestMessage). Default 300 = 5 minutes."
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.alarm_age_threshold_seconds > 0
+    error_message = "alarm_age_threshold_seconds must be > 0."
+  }
+}
+
+variable "alarm_actions" {
+  description = "List of ARNs to notify when alarms fire (typically an SNS topic ARN). Empty list disables actions."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for arn in var.alarm_actions : can(regex("^arn:aws:", arn))])
+    error_message = "Every alarm_actions entry must be a valid AWS ARN."
+  }
+}

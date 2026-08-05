@@ -159,3 +159,34 @@ output "irsa_oidc_provider_arn" {
   description = "ARN of the OIDC provider used for IRSA trust policies."
   value       = var.irsa_enabled ? module.irsa[0].oidc_provider_arn : ""
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQS ALARMS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+output "sqs_dlq_alarm_arns" {
+  description = "Map of queue key to DLQ depth alarm ARN."
+  value       = var.sqs_enabled ? module.sqs[0].dlq_alarm_arns : {}
+}
+
+output "sqs_age_alarm_arns" {
+  description = "Map of queue key to message age alarm ARN."
+  value       = var.sqs_enabled ? module.sqs[0].age_alarm_arns : {}
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OBSERVABILITY — CONSOLIDATED LOG GROUP NAMES
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prerequisite for New Relic spoke: downstream consumers need a single list
+# of all CloudWatch Log Group names produced by this workload to set up
+# subscription filters.
+
+output "all_log_group_names" {
+  description = "Consolidated list of all CloudWatch Log Group names from enabled building blocks. Used by the New Relic spoke to subscribe to all workload logs."
+  value = concat(
+    # Aurora PostgreSQL log group
+    var.aurora_enabled ? [module.aurora[0].cloudwatch_log_group_name] : [],
+    # ElastiCache Serverless does not produce CloudWatch Log Groups
+    # SQS does not produce CloudWatch Log Groups
+  )
+}

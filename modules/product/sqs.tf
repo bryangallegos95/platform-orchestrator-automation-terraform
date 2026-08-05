@@ -36,4 +36,9 @@ module "sqs" {
   producto            = var.producto
   centro_costo        = var.centro_costo
   extra_tags          = var.extra_tags
+
+  # ── CloudWatch Alarms ───────────────────────────────────────────────────────
+  alarm_dlq_threshold         = var.sqs_config.alarm_dlq_threshold
+  alarm_age_threshold_seconds = var.sqs_config.alarm_age_threshold_seconds
+  alarm_actions               = var.sqs_config.alarm_actions
 }
