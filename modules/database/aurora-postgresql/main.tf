@@ -177,7 +177,7 @@ resource "aws_rds_cluster" "this" {
 resource "aws_rds_cluster_instance" "this" {
   for_each = local.instances
 
-  identifier         = "rds-aw-${local.region_short}-${var.service}-${var.workload}-${each.key}-${var.ambiente}"
+  identifier         = "rds-aw-${local.region_short}-${local.resource_suffix}-${each.key}-${var.ambiente}"
   cluster_identifier = aws_rds_cluster.this.id
   engine             = aws_rds_cluster.this.engine
   engine_version     = aws_rds_cluster.this.engine_version
@@ -201,7 +201,7 @@ resource "aws_rds_cluster_instance" "this" {
   monitoring_role_arn                   = local.monitoring_interval > 0 ? aws_iam_role.monitoring[0].arn : null
 
   tags = merge(local.tags, {
-    Name = "rds-aw-${local.region_short}-${var.service}-${var.workload}-${each.key}-${var.ambiente}"
+    Name = "rds-aw-${local.region_short}-${local.resource_suffix}-${each.key}-${var.ambiente}"
   })
 }
 
