@@ -44,6 +44,17 @@ variable "vpc_discovery_service" {
   }
 }
 
+variable "vpc_discovery_tag" {
+  description = "Tag key used for VPC discovery. Default: 'ou' (product repos). Set to 'Name' for integration-platform repos."
+  type        = string
+  default     = "ou"
+
+  validation {
+    condition     = contains(["ou", "Name", "Component"], var.vpc_discovery_tag)
+    error_message = "vpc_discovery_tag must be one of: ou, Name, Component."
+  }
+}
+
 variable "workload" {
   description = "Short name of THIS cache workload within the service (e.g. 'sessions', 'cache', 'rate-limit'). Used as name suffix."
   type        = string

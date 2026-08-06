@@ -9,10 +9,11 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
-# ── VPC discovery (by OU tag — decoupled from VPC naming convention) ──────────
+# ── VPC discovery (configurable tag — default: ou; integration: Name) ─────────
 data "aws_vpc" "spoke" {
-  tags = {
-    ou = local.vpc_ou
+  filter {
+    name   = "tag:${var.vpc_discovery_tag}"
+    values = [local.vpc_ou]
   }
 }
 
