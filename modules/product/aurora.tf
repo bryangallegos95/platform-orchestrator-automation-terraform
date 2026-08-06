@@ -9,12 +9,13 @@ module "aurora" {
   source = "../database/aurora-postgresql"
 
   # ── Identity (common) ───────────────────────────────────────────────────────
-  aws_region     = var.aws_region
-  service        = var.service
-  workload       = var.workload
-  funcionalidad  = var.funcionalidad
-  ambiente       = var.ambiente
-  aws_account_id = var.aws_account_id
+  aws_region        = var.aws_region
+  service           = var.service
+  vpc_discovery_tag = var.vpc_discovery_tag
+  workload          = var.workload
+  funcionalidad     = var.funcionalidad
+  ambiente          = var.ambiente
+  aws_account_id    = var.aws_account_id
 
   # ── Engine ──────────────────────────────────────────────────────────────────
   engine_version = var.aurora_config.engine_version

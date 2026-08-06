@@ -24,8 +24,9 @@ locals {
   # ── Environment posture ───────────────────────────────────────────────────
   is_prod_like = contains(["preprod", "prod", "dr"], var.ambiente)
 
-  # ── VPC discovery: by OU tag (decoupled from VPC naming convention) ────
-  # var.service carries the OU name (lowercase) from orchestrator extra_vars
+  # ── VPC discovery value — var.service carries the lookup value. ────────
+  # When vpc_discovery_tag = "ou": var.service = OU name (e.g. "contenerizacion")
+  # When vpc_discovery_tag = "Name": var.service = VPC name (e.g. "vpc-aw-ue1-centralized-ingress-dev")
   vpc_ou = var.service
 
   # ── Composed naming suffix ───────────────────────────────────────────────

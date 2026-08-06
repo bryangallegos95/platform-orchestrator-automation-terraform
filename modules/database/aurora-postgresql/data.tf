@@ -20,10 +20,11 @@ data "aws_caller_identity" "current" {}
 # (terraform_data.guards) to catch a provider/region mismatch.
 data "aws_region" "current" {}
 
-# The Spoke VPC discovered by OU tag (decoupled from VPC naming convention).
+# The Spoke VPC discovered by configurable tag (default: ou; integration: Name).
 data "aws_vpc" "spoke" {
-  tags = {
-    ou = local.vpc_ou
+  filter {
+    name   = "tag:${var.vpc_discovery_tag}"
+    values = [local.vpc_ou]
   }
 }
 

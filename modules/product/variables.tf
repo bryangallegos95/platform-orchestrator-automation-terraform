@@ -33,6 +33,17 @@ variable "service" {
   }
 }
 
+variable "vpc_discovery_tag" {
+  description = "Tag key used for VPC discovery in child modules. Default: 'ou'. Set to 'Name' for integration-platform."
+  type        = string
+  default     = "ou"
+
+  validation {
+    condition     = contains(["ou", "Name", "Component"], var.vpc_discovery_tag)
+    error_message = "vpc_discovery_tag must be one of: ou, Name, Component."
+  }
+}
+
 variable "workload" {
   description = "Short workload name (e.g. 'pagos-core', 'notificaciones'). Used in resource naming."
   type        = string
