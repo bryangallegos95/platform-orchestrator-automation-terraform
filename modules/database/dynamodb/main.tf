@@ -21,7 +21,7 @@
 #   - Point-in-Time Recovery: always enabled
 #   - Table catalog and key schema: fixed in locals.tf
 #
-# ⚠️ Escrito SIN acceso a `platform-knowledge-base`. Los `# TODO: validar contra
+# Escrito SIN acceso a `platform-knowledge-base`. Los `# TODO: validar contra
 #    platform-knowledge-base` marcan PROPUESTAS pendientes de confirmar.
 
 
@@ -33,7 +33,7 @@ resource "aws_dynamodb_table" "this" {
   billing_mode = var.billing_mode
   table_class  = var.table_class
 
-  # ── Key schema — 🔒 LOCKED ───────────────────────────────────────────────
+  # ── Key schema — LOCKED ───────────────────────────────────────────────
   hash_key  = each.value.hash_key
   range_key = each.value.range_key
 
@@ -68,7 +68,7 @@ resource "aws_dynamodb_table" "this" {
     }
   }
 
-  # ── TTL — habilitado en `logs` y `wait-logs` ─────────────────────────────
+  # ── TTL — `logs` / `wait-logs` + espejo en sus tablas de payloads ────────
   # DynamoDB expira por epoch escrito en el atributo por la aplicación; los
   # días de retención se exponen como output para el productor de ítems.
   ttl {
@@ -80,7 +80,7 @@ resource "aws_dynamodb_table" "this" {
   stream_enabled   = each.value.stream_view_type != null
   stream_view_type = each.value.stream_view_type
 
-  # ── Encryption — 🔒 LOCKED ───────────────────────────────────────────────
+  # ── Encryption — LOCKED ───────────────────────────────────────────────
   # CMK de cuenta descubierta por alias. NUNCA la clave AWS-managed
   # (`alias/aws/dynamodb`), que es lo que aplica DynamoDB si se omite el bloque.
   server_side_encryption {
@@ -88,7 +88,7 @@ resource "aws_dynamodb_table" "this" {
     kms_key_arn = local.kms_key_arn
   }
 
-  # ── Point-in-Time Recovery — 🔒 LOCKED (PROPUESTO) ───────────────────────
+  # ── Point-in-Time Recovery — LOCKED (PROPUESTO) ───────────────────────
   # TODO: validar contra platform-knowledge-base — se propone LOCKED (siempre
   # ON, sin variable, según la regla "no añadir variables para settings LOCKED"
   # de AGENTS.md). Si el baseline lo define como GUARD-RAIL por ambiente, pasa
@@ -97,7 +97,7 @@ resource "aws_dynamodb_table" "this" {
     enabled = true
   }
 
-  # ── 🛡️ GUARD-RAIL — Deletion protection ────────────────────────────────
+  # ── GUARD-RAIL — Deletion protection ────────────────────────────────
   deletion_protection_enabled = local.deletion_protection_enabled
 
   tags = merge(local.tags, { Name = local.table_names[each.key] })
@@ -116,7 +116,7 @@ resource "aws_dynamodb_table" "this" {
       error_message = "provisioned_read_capacity/provisioned_write_capacity only apply with billing_mode=PROVISIONED. Leave them null with PAY_PER_REQUEST."
     }
 
-    # 🛡️ GUARD-RAIL: la deletion protection no se puede bajar en prod-like.
+    # GUARD-RAIL: la deletion protection no se puede bajar en prod-like.
     precondition {
       condition     = !local.deletion_protection_floor || local.deletion_protection_enabled
       error_message = "deletion_protection_enabled cannot be disabled in ${var.ambiente} (prod-like floor is ON)."

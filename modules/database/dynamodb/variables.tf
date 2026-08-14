@@ -10,7 +10,7 @@
 #   FREE       — billing mode + capacity, table class, GSI projection,
 #                TTL attribute name / retention above the floor, extra tags.
 #
-# ⚠️ Este módulo se escribió SIN acceso a `platform-knowledge-base`.
+#    Este módulo se escribió SIN acceso a `platform-knowledge-base`.
 #    Todo lo marcado `# TODO: validar contra platform-knowledge-base` es una
 #    PROPUESTA (naming, alias KMS, pisos por ambiente) y debe confirmarse.
 
@@ -142,7 +142,7 @@ variable "gsi_projection_type" {
 
 # ── TTL ───────────────────────────────────────────────────────────────────────
 variable "ttl_attribute_name" {
-  description = "Item attribute holding the expiration epoch (seconds) used by DynamoDB TTL. Enabled on `logs` and `wait-logs`."
+  description = "Item attribute holding the expiration epoch (seconds) used by DynamoDB TTL. Enabled on `logs` / `wait-logs` and mirrored on `log-payloads` / `wait-payloads` — el mismo atributo en las cuatro tablas."
   type        = string
   default     = "ttl"
 

@@ -34,7 +34,7 @@ locals {
   }
 
   # ── Atributo de estado del GSI 3 de `logs` ───────────────────────────────
-  # ⚠️ DISCREPANCIA EN LA FUENTE: el análisis de Central Log lista el atributo
+  # DISCREPANCIA EN LA FUENTE: el análisis de Central Log lista el atributo
   # de la tabla `logs` como `estado` (español, igual que en `applications`,
   # `services` y `wait-logs`) pero nombra el GSI 3 sobre `status` (inglés).
   # Se asume `estado` por consistencia con el resto del modelo. Se define UNA
@@ -43,7 +43,22 @@ locals {
   # OJO: cambiar la key de un GSI ya creado obliga a recrear el índice.
   logs_status_attribute = "estado"
 
-  # ── CATÁLOGO DE TABLAS — 🔒 LOCKED ───────────────────────────────────────
+  # ── TTL espejo en las tablas de payloads ─────────────────────────────────
+  # `log-payloads` y `wait-payloads` son 1:1 con `logs` y `wait-logs` (misma
+  # key: id_log / id_wait_log), que SÍ expiran por TTL. Sin TTL espejo, al
+  # expirar el log padre su payload queda huérfano para siempre: la tabla que
+  # se separó justamente para aliviar el tamaño de `logs` crece sin control.
+  # Se habilita con el MISMO atributo (var.ttl_attribute_name) que las tablas
+  # padre, así que el productor escribe el mismo epoch en ambas.
+  #
+  # TODO: validar contra platform-knowledge-base / equipo de Central Log —
+  # ¿el payload debe expirar en el MISMO momento que su log padre (asumido
+  # aquí, es lo que evita huérfanos) o algún requisito de auditoría exige que
+  # el payload sobreviva al log? Si sobrevive, esto NO es un booleano: haría
+  # falta un desfase de retención propio para las tablas de payloads.
+  payload_ttl_enabled = true
+
+  # ── CATÁLOGO DE TABLAS — LOCKED ───────────────────────────────────────
   # Solo se declaran los atributos que participan en una key (tabla o GSI):
   # DynamoDB es schemaless y rechaza `attribute` blocks que no estén indexados.
   # Los atributos no-clave de cada ítem se documentan como comentario.
@@ -91,12 +106,14 @@ locals {
 
     # PK: id_log (1:1 con `logs`) — payloads separados para no inflar la tabla
     # caliente ni sus GSIs con blobs.
-    # Atributos no-clave: data_in, data_out, additional_data, data_type
+    # Atributos no-clave: data_in, data_out, additional_data, data_type (+ TTL)
+    #
+    # TTL ESPEJO — ver `local.payload_ttl_enabled`.
     log-payloads = {
       hash_key         = "id_log"
       range_key        = null
       attributes       = { id_log = "S" }
-      ttl_enabled      = false
+      ttl_enabled      = local.payload_ttl_enabled
       stream_view_type = null
     }
 
@@ -112,12 +129,14 @@ locals {
     }
 
     # PK: id_wait_log (1:1 con `wait-logs`)
-    # Atributos no-clave: data_in, data_out, additional_data, data_type
+    # Atributos no-clave: data_in, data_out, additional_data, data_type (+ TTL)
+    #
+    # TTL ESPEJO — ver `local.payload_ttl_enabled`.
     wait-payloads = {
       hash_key         = "id_wait_log"
       range_key        = null
       attributes       = { id_wait_log = "S" }
-      ttl_enabled      = false
+      ttl_enabled      = local.payload_ttl_enabled
       stream_view_type = null
     }
   }
@@ -134,7 +153,7 @@ locals {
     }
   }
 
-  # ── GSIs por tabla — 🔒 LOCKED (la proyección es FREE) ───────────────────
+  # ── GSIs por tabla — LOCKED (la proyección es FREE) ───────────────────
   # Se mantienen fuera de local.tables para no romper la unificación de tipos
   # del for_each (5 tablas sin índices vs 1 con índices).
   gsis = {
@@ -154,14 +173,14 @@ locals {
   read_capacity  = local.is_provisioned ? var.provisioned_read_capacity : null
   write_capacity = local.is_provisioned ? var.provisioned_write_capacity : null
 
-  # ── 🛡️ GUARD-RAIL — Deletion protection ─────────────────────────────────
+  # ── GUARD-RAIL — Deletion protection ─────────────────────────────────
   # Piso ON en prod-like (mismo criterio que aurora-postgresql). El hijo puede
   # activarla en dev/qa, nunca desactivarla en preprod/prod/dr.
   # TODO: validar contra platform-knowledge-base.
   deletion_protection_floor   = local.is_prod_like
   deletion_protection_enabled = local.deletion_protection_floor || coalesce(var.deletion_protection_enabled, false)
 
-  # ── 🛡️ GUARD-RAIL — Retención TTL (piso por ambiente) ───────────────────
+  # ── GUARD-RAIL — Retención TTL (piso por ambiente) ───────────────────
   # Informativo para el productor de ítems (ver output ttl_retention_days).
   # TODO: validar contra platform-knowledge-base (requisitos regulatorios).
   ttl_retention_floor_days = local.is_prod_like ? 365 : 30

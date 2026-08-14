@@ -39,7 +39,7 @@ output "ttl_attribute_name" {
 }
 
 output "ttl_enabled_tables" {
-  description = "Claves lógicas de las tablas con TTL habilitado (hoy: logs, wait-logs)."
+  description = "Claves lógicas de las tablas con TTL habilitado (hoy: logs, wait-logs y sus tablas de payloads por TTL espejo)."
   value       = sort([for key, cfg in local.tables : key if cfg.ttl_enabled])
 }
 

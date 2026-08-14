@@ -4,7 +4,7 @@
 
 ---
 
-> ### ⚠️ BORRADOR — pendiente de validar contra `platform-knowledge-base`
+> ### BORRADOR — pendiente de validar contra `platform-knowledge-base`
 >
 > Este módulo se escribió **sin acceso** al repo `platform-knowledge-base` (naming conventions oficiales, mapa de cuentas, baseline de seguridad).
 > Todo lo que normalmente vendría de esa fuente está marcado en el código como `# TODO: validar contra platform-knowledge-base` y **es propuesta, no decisión**:
@@ -16,6 +16,7 @@
 > | PITR como LOCKED | siempre ON, sin variable | `main.tf` → bloque `point_in_time_recovery` |
 > | Deletion protection | piso ON en prod-like | `locals.tf` → `deletion_protection_floor` |
 > | Piso de retención TTL | 365 d prod-like / 30 d dev-qa | `locals.tf` → `ttl_retention_floor_days` |
+> | TTL espejo en payloads | ON — el payload expira con su log padre | `locals.tf` → `payload_ttl_enabled` |
 > | Billing mode | `PAY_PER_REQUEST` | `variables.tf` → `billing_mode` |
 > | Proyección de GSIs | `ALL` | `variables.tf` → `gsi_projection_type` |
 > | Atributo del GSI 3 de `logs` | `estado` (la fuente dice `estado` como atributo y `status` como GSI) | `locals.tf` → `logs_status_attribute` |
@@ -41,10 +42,10 @@ DynamoDB es *schemaless*: Terraform solo declara los atributos que participan en
 |-------|----|----|--------------------|-----|---------|------|
 | `applications` | `application_code` (S) | — | `nombre`, `estado`, `descripcion`, `creation_date` | — | — | — |
 | `services` | `service_code` (S) | `application_code` (S) | `estado`, `tipo`, `service_name` | — | — | — |
-| `logs` | `id_log` (S) | — | `client_id` (+ `ttl`) | ✅ | — | 4 |
-| `log-payloads` | `id_log` (S) | — | `data_in`, `data_out`, `additional_data`, `data_type` | — | — | — |
-| `wait-logs` | `id_wait_log` (S) | — | `application_code`, `service_code`, `estado` (+ `ttl`) | ✅ | ✅ | — |
-| `wait-payloads` | `id_wait_log` (S) | — | `data_in`, `data_out`, `additional_data`, `data_type` | — | — | — |
+| `logs` | `id_log` (S) | — | `client_id` (+ `ttl`) | — | 4 |
+| `log-payloads` | `id_log` (S) | — | `data_in`, `data_out`, `additional_data`, `data_type` (+ `ttl`) | (propuesto, espejo del padre)* | — | — |
+| `wait-logs` | `id_wait_log` (S) | — | `application_code`, `service_code`, `estado` (+ `ttl`) | | — |
+| `wait-payloads` | `id_wait_log` (S) | — | `data_in`, `data_out`, `additional_data`, `data_type` (+ `ttl`) | (propuesto, espejo del padre)* | — | — |
 
 En `logs`, los atributos `application_code`, `service_code`, `timestamp`, `estado` y `user_name` **sí** se declaran porque son keys de sus GSIs.
 
@@ -54,10 +55,10 @@ En `logs`, los atributos `application_code`, `service_code`, `timestamp`, `estad
 |--------|------|-------|
 | `application-code-timestamp-index` | `application_code` (S) | `timestamp` (N, epoch) |
 | `service-code-timestamp-index` | `service_code` (S) | `timestamp` (N, epoch) |
-| `status-timestamp-index` | `estado` (S) ⚠️ | `timestamp` (N, epoch) |
+| `status-timestamp-index` | `estado` (S) | `timestamp` (N, epoch) |
 | `user-name-timestamp-index` | `user_name` (S) | `timestamp` (N, epoch) |
 
-⚠️ El análisis de Central Log lista el atributo de la tabla como `estado` pero nombra el GSI 3 sobre `status`. Se asumió `estado` por consistencia con el resto del modelo; se define **una sola vez** en `locals.tf` (`logs_status_attribute`). **Cambiar la key de un GSI ya creado obliga a recrear el índice**, así que conviene confirmarlo antes del primer apply.
+El análisis de Central Log lista el atributo de la tabla como `estado` pero nombra el GSI 3 sobre `status`. Se asumió `estado` por consistencia con el resto del modelo; se define **una sola vez** en `locals.tf` (`logs_status_attribute`). **Cambiar la key de un GSI ya creado obliga a recrear el índice**, así que conviene confirmarlo antes del primer apply.
 
 > `timestamp` es palabra reservada en las *expressions* de DynamoDB: la aplicación debe usar `ExpressionAttributeNames` (`#ts`) al consultar. No afecta a la definición del índice.
 
@@ -89,13 +90,13 @@ Ejemplo: `ddb-aw-ue1-centrallog-trazabilidad-logs-prod`
 
 | Control | Valor | Estado |
 |---------|-------|--------|
-| Cifrado en reposo | CMK de cuenta (`var.kms_alias`), nunca `alias/aws/dynamodb` | ✅ firme (baseline del repo) |
-| Point-in-Time Recovery | habilitado en las 6 tablas | 🟡 **propuesto** — barato y buena práctica; confirmar si el baseline lo quiere GUARD-RAIL por ambiente |
-| Catálogo de tablas | las 6 tablas, fijas en `locals.tf` | 🟡 propuesto — el hijo no elige subconjunto |
-| Key schema (PK/SK) | fijo por tabla | ✅ firme (define el modelo) |
-| Definición de GSIs (keys) | 4 GSIs en `logs` | 🟡 propuesto — la *proyección* sí es FREE |
-| Streams en `wait-logs` | `NEW_AND_OLD_IMAGES` | ✅ firme (lo exige el Lambda `wait-processor`) |
-| TTL habilitado en `logs` y `wait-logs` | sí | 🟡 propuesto |
+| Cifrado en reposo | CMK de cuenta (`var.kms_alias`), nunca `alias/aws/dynamodb` | firme (baseline del repo) |
+| Point-in-Time Recovery | habilitado en las 6 tablas | **propuesto** — barato y buena práctica; confirmar si el baseline lo quiere GUARD-RAIL por ambiente |
+| Catálogo de tablas | las 6 tablas, fijas en `locals.tf` | propuesto — el hijo no elige subconjunto |
+| Key schema (PK/SK) | fijo por tabla | firme (define el modelo) |
+| Definición de GSIs (keys) | 4 GSIs en `logs` | propuesto — la *proyección* sí es FREE |
+| Streams en `wait-logs` | `NEW_AND_OLD_IMAGES` | firme (lo exige el Lambda `wait-processor`) |
+| TTL habilitado en `logs` y `wait-logs` | sí — y **espejado en `log-payloads` / `wait-payloads`** con el mismo atributo | propuesto — el espejo evita payloads huérfanos; confirmar si auditoría exige que el payload sobreviva al log padre |
 
 En línea con `AGENTS.md` ("no añadir variables para settings LOCKED"), **no existe** variable para desactivar PITR ni el cifrado.
 
@@ -103,8 +104,8 @@ En línea con `AGENTS.md` ("no añadir variables para settings LOCKED"), **no ex
 
 | Control | dev / qa | preprod | prod / dr | Estado |
 |---------|----------|---------|-----------|--------|
-| Deletion protection | opt-in (default OFF) | **ON (piso)** | **ON (piso)** | 🟡 propuesto — mismo criterio que Aurora |
-| Retención TTL (piso) | 30 d | 365 d | 365 d | 🟡 propuesto — sin requisito regulatorio confirmado |
+| Deletion protection | opt-in (default OFF) | **ON (piso)** | **ON (piso)** | propuesto — mismo criterio que Aurora |
+| Retención TTL (piso) | 30 d | 365 d | 365 d | propuesto — sin requisito regulatorio confirmado |
 
 Los pisos se aplican en `locals.tf` y se verifican con `precondition` en `main.tf`.
 
@@ -140,11 +141,19 @@ Un `precondition` exige que ambas capacities estén presentes con `PROVISIONED` 
 
 ## TTL: qué hace y qué NO hace el módulo
 
-El módulo **habilita el mecanismo**: marca el atributo `ttl` como atributo de expiración en `logs` y `wait-logs`.
+El módulo **habilita el mecanismo**: marca el atributo `ttl` como atributo de expiración en `logs` / `wait-logs` y, por espejo, en `log-payloads` / `wait-payloads`.
 
 DynamoDB **no acepta "días"** — expira ítems cuyo atributo `ttl` contenga un epoch (segundos) pasado. **La aplicación productora debe escribir ese valor.** Por eso `ttl_retention_days` se expone como *output*: el API / Lambda calcula `now + ttl_retention_days` al insertar.
 
 Si un ítem no lleva el atributo, **nunca expira**.
+
+### TTL espejo en las tablas de payloads
+
+`log-payloads` y `wait-payloads` son 1:1 con sus tablas padre (misma key: `id_log` / `id_wait_log`). Sin TTL espejo, cuando el log padre expira **el payload queda huérfano para siempre**: la tabla que se separó justamente para aliviar el tamaño de `logs` crece sin control.
+
+Por eso el productor debe escribir el **mismo** atributo `ttl` con el **mismo** epoch al insertar el par log + payload. DynamoDB no propaga la expiración entre tablas: son dos TTL independientes que solo coinciden si la aplicación escribe el mismo valor.
+
+> **Propuesta pendiente** de confirmar con el equipo de Central Log: se asume que el payload expira *en el mismo momento* que su log padre. Si un requisito de auditoría exige que el payload sobreviva al log, esto deja de ser un booleano y hace falta un desfase de retención propio para las tablas de payloads. Se controla en `locals.tf` → `payload_ttl_enabled`.
 
 ---
 
@@ -152,7 +161,7 @@ Si un ítem no lleva el atributo, **nunca expira**.
 
 | Recurso | Cómo se resuelve |
 |---------|------------------|
-| CMK DynamoDB | `alias/DynamoDB` ⚠️ *(alias real por confirmar)* — o `kms_key_arn` explícito |
+| CMK DynamoDB | `alias/DynamoDB` *(alias real por confirmar)* — o `kms_key_arn` explícito |
 
 El módulo **nunca crea llaves KMS**. No hay lookup de VPC/subnets: DynamoDB no vive en la VPC.
 
